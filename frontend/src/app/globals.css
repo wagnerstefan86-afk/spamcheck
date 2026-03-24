@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background: #0b0d14;
+  color: #e2e8f0;
+}
+
+.badge-red { @apply bg-red-500/15 text-red-400 border border-red-500/30; }
+.badge-amber { @apply bg-amber-500/15 text-amber-400 border border-amber-500/30; }
+.badge-blue { @apply bg-blue-500/15 text-blue-400 border border-blue-500/30; }
+.badge-green { @apply bg-emerald-500/15 text-emerald-400 border border-emerald-500/30; }
+.badge-gray { @apply bg-slate-500/15 text-slate-400 border border-slate-500/30; }
+
+.card {
+  @apply bg-bg-card border border-border rounded-xl p-5;
+}
+
+.accordion-trigger {
+  @apply w-full flex justify-between items-center py-3 px-4 text-left text-sm font-medium text-slate-300 bg-bg-secondary rounded-lg hover:bg-slate-800 transition;
+}
+
+.score-bar {
+  @apply h-2 rounded-full transition-all duration-700;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.pulse-dot {
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
