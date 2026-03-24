@@ -1,7 +1,10 @@
 /**
- * Score driver extraction and decision explanation generation.
+ * Score driver extraction, decision factors, and explanation generation.
  *
- * Uses conflict assessment to produce weighted, honest explanations.
+ * Provides:
+ * - extractScoreDrivers(): raw score impact parsing
+ * - extractDecisionFactors(): top 2-4 positive/negative signals for the decision
+ * - generateDecisionExplanation(): conflict-aware 1-2 sentence explanation
  */
 
 import type {
@@ -9,6 +12,7 @@ import type {
   IdentityAssessment,
   LinkStats,
   ConflictAssessment,
+  PrioritizedSignal,
 } from "./types";
 
 // ─── Score Drivers ──────────────────────────────────────────────────────────
@@ -19,7 +23,6 @@ export function extractScoreDrivers(result: any): ScoreDriver[] {
 
   for (const df of detFindings) {
     if (!df.detail || !df.impact) continue;
-
     const impactMatch = df.impact.match(/(phishing|advertising|legitimacy)([+-]\d+)/);
     if (!impactMatch) continue;
 
@@ -38,15 +41,46 @@ export function extractScoreDrivers(result: any): ScoreDriver[] {
   return drivers;
 }
 
+// ─── Decision Factors ───────────────────────────────────────────────────────
+
+export type DecisionFactors = {
+  negative: PrioritizedSignal[];
+  positive: PrioritizedSignal[];
+  /** Labels of signals promoted to this block, for dedup in EvidenceGroups */
+  promotedLabels: Set<string>;
+};
+
+const MAX_FACTORS = 4;
+
+/**
+ * Extracts the top 2-4 positive and negative signals for the decision summary.
+ *
+ * Signals are selected by tier (highest first), deduplicated by domain,
+ * and capped at MAX_FACTORS per side.
+ */
+export function extractDecisionFactors(signals: PrioritizedSignal[]): DecisionFactors {
+  const negative = signals
+    .filter((s) => s.direction === "negative" && s.tier >= 3)
+    .sort((a, b) => b.tier - a.tier)
+    .slice(0, MAX_FACTORS);
+
+  const positive = signals
+    .filter((s) => s.direction === "positive" && s.tier >= 1)
+    .sort((a, b) => b.tier - a.tier)
+    .slice(0, MAX_FACTORS);
+
+  const promotedLabels = new Set<string>();
+  for (const s of [...negative, ...positive]) {
+    promotedLabels.add(s.label);
+  }
+
+  return { negative, positive, promotedLabels };
+}
+
 // ─── Decision Explanation ───────────────────────────────────────────────────
 
 /**
- * Generates a data-driven decision explanation that integrates conflict awareness.
- *
- * The explanation addresses:
- * - Primary positive/negative drivers
- * - Bulk context (correctly scoped)
- * - Dominant signal in conflict cases
+ * Generates a compact 1-2 sentence explanation integrating conflict awareness.
  *
  * Returns null only if LLM analyst_summary is present AND no conflict exists.
  */
@@ -64,7 +98,7 @@ export function generateDecisionExplanation(
 
   const parts: string[] = [];
 
-  // Auth status
+  // Auth status — one sentence
   const authPassed = identity.authSignals.filter((s) => s.status === "pass");
   const authFailed = identity.authSignals.filter((s) => s.status === "fail");
   if (authPassed.length > 0 && authFailed.length === 0) {
@@ -73,7 +107,7 @@ export function generateDecisionExplanation(
     parts.push(`Authentifizierung teilweise fehlgeschlagen (${authFailed.map((s) => s.protocol).join(", ")}).`);
   }
 
-  // Link status
+  // Link status — one sentence
   if (linkStats.total > 0) {
     if (linkStats.malicious > 0) {
       parts.push(`${linkStats.malicious} maliziöse Link-Bewertungen festgestellt.`);
@@ -84,25 +118,13 @@ export function generateDecisionExplanation(
     }
   }
 
-  // Bulk context — scoped correctly
+  // Bulk context or identity — one sentence, not both
   if (identity.isBulkSender && conflict.bulkDowngradeApplied) {
-    parts.push("Domain-Abweichungen passen zu typischen Newsletter-Versandmustern und werden durch gültige Authentifizierung gestützt.");
+    parts.push("Domain-Abweichungen passen zu typischen Newsletter-Versandmustern.");
   } else if (identity.isBulkSender && conflict.bulkDowngradeBlocked) {
-    parts.push(`Newsletter-Kontext erkannt, aber Entschärfung nicht möglich: ${conflict.bulkDowngradeBlockReason?.replace("Herabstufung blockiert: ", "")}.`);
+    parts.push(`Newsletter-Kontext erkannt, aber Entschärfung nicht möglich.`);
   } else if (identity.consistency === "suspicious") {
     parts.push("Kritische Inkonsistenzen in der Absenderidentität.");
-  }
-
-  // Conflict dominance — the key new addition
-  if (conflict.hasConflict && conflict.dominantSignal) {
-    // Only add if not already covered by the above
-    const d = conflict.dominantSignal;
-    if (d.tier === 5 && d.domain === "links" && authPassed.length > 0) {
-      // Already covered by conflict.explanation, which is shown separately
-    } else if (d.tier === 5 && d.domain === "auth" && linkStats.criticalLinks.length === 0) {
-      // Already covered
-    }
-    // The conflict explanation itself is shown via the UI component
   }
 
   return parts.length > 0 ? parts.join(" ") : null;

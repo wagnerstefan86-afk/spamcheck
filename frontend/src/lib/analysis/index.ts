@@ -31,5 +31,6 @@ export { classifyEvidence } from "./evidence";
 // Link analysis
 export { summarizeLinks } from "./links";
 
-// Score drivers & Decision explanation
-export { extractScoreDrivers, generateDecisionExplanation } from "./decision";
+// Score drivers & Decision explanation & Decision factors
+export type { DecisionFactors } from "./decision";
+export { extractScoreDrivers, generateDecisionExplanation, extractDecisionFactors } from "./decision";

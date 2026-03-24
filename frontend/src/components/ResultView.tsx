@@ -2,9 +2,9 @@
 
 import { useMemo } from "react";
 import DecisionHeader from "./DecisionHeader";
+import DecisionFactors from "./DecisionFactors";
 import EvidenceGroups from "./EvidenceGroups";
 import IdentityBlock from "./IdentityBlock";
-import ConflictExplanation from "./ConflictExplanation";
 import LinkSummary from "./LinkSummary";
 import SenderInfo from "./SenderInfo";
 import ScoreDetails from "./ScoreDetails";
@@ -16,6 +16,7 @@ import {
   classifyEvidence,
   summarizeLinks,
   extractScoreDrivers,
+  extractDecisionFactors,
   generateDecisionExplanation,
 } from "../lib/analysis";
 
@@ -27,20 +28,21 @@ type Props = {
 export default function ResultView({ result, onDownload }: Props) {
   const a = result.assessment;
 
-  // 1. Identity & auth assessment
+  // 1. Core analysis
   const identity = useMemo(() => assessIdentity(result), [result]);
-
-  // 2. Link analysis
   const linkStats = useMemo(() => summarizeLinks(result.links || []), [result.links]);
 
-  // 3. Priority signals → conflict assessment
+  // 2. Priority signals → conflict
   const signals = useMemo(
     () => collectSignals(identity, linkStats, result.header_findings || [], result.deterministic_findings || []),
     [identity, linkStats, result.header_findings, result.deterministic_findings]
   );
   const conflict = useMemo(() => assessConflict(signals, identity), [signals, identity]);
 
-  // 4. Evidence classification (uses guarded bulk downgrade)
+  // 3. Decision factors (top signals for the compact block)
+  const decisionFactors = useMemo(() => extractDecisionFactors(signals), [signals]);
+
+  // 4. Evidence classification
   const evidenceGroups = useMemo(
     () => classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals),
     [result, identity.isBulkSender, signals, identity.authSignals]
@@ -49,14 +51,14 @@ export default function ResultView({ result, onDownload }: Props) {
   // 5. Score drivers
   const scoreDrivers = useMemo(() => extractScoreDrivers(result), [result]);
 
-  // 6. Decision explanation (conflict-aware)
+  // 6. Decision explanation
   const generatedExplanation = useMemo(
     () => generateDecisionExplanation(result, identity, linkStats, conflict),
     [result, identity, linkStats, conflict]
   );
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       {/* Service status badges */}
       <div className="flex flex-wrap gap-2">
         {[
@@ -80,46 +82,47 @@ export default function ResultView({ result, onDownload }: Props) {
         )}
       </div>
 
-      {/* 1. DECISION HEADER */}
+      {/* ── 1. DECISION ──────────────────────────────────────── */}
       <DecisionHeader assessment={a} />
 
-      {/* 2. DECISION EXPLANATION + CONFLICT */}
-      {a && (
-        <div className="space-y-3">
-          <div className="card">
-            <p className="text-xs text-text-secondary uppercase tracking-wider font-semibold mb-2">Kurzbegründung</p>
-            {a.analyst_summary && (
-              <p className="text-sm text-text-primary leading-relaxed">{a.analyst_summary}</p>
-            )}
-            {generatedExplanation && (
-              <p className={`text-sm leading-relaxed ${a.analyst_summary ? "text-text-primary/60 mt-1.5" : "text-text-primary"}`}>
-                {generatedExplanation}
-              </p>
-            )}
-            {a.rationale && a.rationale !== a.analyst_summary && !generatedExplanation && (
-              <p className="text-sm text-text-primary/70 leading-relaxed mt-1.5">{a.rationale}</p>
-            )}
-          </div>
-
-          {/* Conflict explanation — only shown when mixed signals exist */}
-          <ConflictExplanation conflict={conflict} />
+      {/* ── 2. RATIONALE (compact, one block) ────────────────── */}
+      {a && (a.analyst_summary || generatedExplanation || a.rationale) && (
+        <div className="card py-3">
+          <p className="text-xs text-text-secondary uppercase tracking-wider font-semibold mb-1.5">Kurzbegründung</p>
+          {a.analyst_summary && (
+            <p className="text-sm text-text-primary leading-relaxed">{a.analyst_summary}</p>
+          )}
+          {generatedExplanation && (
+            <p className={`text-sm leading-relaxed ${a.analyst_summary ? "text-text-primary/60 mt-1" : "text-text-primary"}`}>
+              {generatedExplanation}
+            </p>
+          )}
+          {a.rationale && a.rationale !== a.analyst_summary && !generatedExplanation && !a.analyst_summary && (
+            <p className="text-sm text-text-primary/70 leading-relaxed">{a.rationale}</p>
+          )}
         </div>
       )}
 
-      {/* 3. EVIDENCE GROUPS */}
-      <EvidenceGroups groups={evidenceGroups} />
+      {/* ── 3. DECISION FACTORS (belastend / entlastend) ─────── */}
+      <DecisionFactors factors={decisionFactors} conflict={conflict} />
+
+      {/* ── 4. IDENTITY & AUTH ───────────────────────────────── */}
+      <IdentityBlock identity={identity} />
+
+      {/* ── 5. SUPPORTING EVIDENCE (collapsed, deduplicated) ── */}
+      <EvidenceGroups groups={evidenceGroups} promotedLabels={decisionFactors.promotedLabels} />
 
       {/* Warnings */}
       {result.warnings?.length > 0 && (
-        <div className="card border border-amber-200 bg-amber-50/30">
+        <div className="card border border-amber-200 bg-amber-50/30 py-3">
           <div className="flex items-start gap-3">
-            <div className="w-7 h-7 rounded-full bg-amber-100 flex items-center justify-center shrink-0">
-              <svg className="w-3.5 h-3.5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <div className="w-6 h-6 rounded-full bg-amber-100 flex items-center justify-center shrink-0">
+              <svg className="w-3 h-3 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M12 3l9.5 16.5H2.5L12 3z" />
               </svg>
             </div>
             <div>
-              <p className="text-sm font-semibold text-amber-800 mb-1">Warnungen ({result.warnings.length})</p>
+              <p className="text-sm font-semibold text-amber-800 mb-0.5">Warnungen ({result.warnings.length})</p>
               {result.warnings.map((w: string, i: number) => (
                 <p key={i} className="text-sm text-amber-700/70 leading-relaxed">{w}</p>
               ))}
@@ -128,21 +131,18 @@ export default function ResultView({ result, onDownload }: Props) {
         </div>
       )}
 
-      {/* 4. IDENTITY & AUTH */}
-      <IdentityBlock identity={identity} />
-
-      {/* 5. SENDER CONTEXT */}
+      {/* ── 6. SENDER DETAILS ────────────────────────────────── */}
       <SenderInfo result={result} />
 
-      {/* 6. LINK SUMMARY */}
+      {/* ── 7. LINK SUMMARY ──────────────────────────────────── */}
       <LinkSummary links={result.links || []} stats={linkStats} />
 
-      {/* 7. SCORE DETAILS */}
+      {/* ── 8. SCORES (secondary, collapsed) ─────────────────── */}
       {result.deterministic_scores && (
         <ScoreDetails scores={result.deterministic_scores} drivers={scoreDrivers} />
       )}
 
-      {/* 8. TECHNICAL DETAILS */}
+      {/* ── 9. TECHNICAL DETAILS (collapsed) ─────────────────── */}
       <Accordion title="Technische Details">
         <div className="text-xs text-text-secondary space-y-2.5">
           <p><strong className="text-text-primary">Authentication-Results:</strong> {result.authentication_results || "\u2014"}</p>
