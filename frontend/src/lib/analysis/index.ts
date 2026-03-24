@@ -1,8 +1,8 @@
 /**
  * Analysis module — public API.
  *
- * Primary pipeline: normalizeSignals() → toPrioritizedSignals() / toEvidenceGroups()
- * Legacy: collectSignals() and classifyEvidence() are deprecated.
+ * Primary entry point: analyzeResult(rawResult) → AnalysisResult
+ * All UI components and export consume AnalysisResult projections.
  */
 
 // Core types
@@ -22,23 +22,21 @@ export type {
   SignalCategory,
   SignalSourceType,
   AnalysisSummary,
+  AnalysisResult,
 } from "./types";
 
-// Identity & Auth
-export { assessIdentity, detectBulkMail } from "./identity";
+// Central pipeline (primary API)
+export type { DecisionFactors } from "./decision";
+export { analyzeResult, buildAnalysisSummary, generateDecisionExplanation, extractDecisionFactors, extractScoreDrivers } from "./decision";
 
-// Central normalization (primary API)
+// Normalization (for direct use in tests)
 export { normalizeSignals, toPrioritizedSignals, toEvidenceGroups, deriveCanonicalKey } from "./normalize";
+
+// Identity & Auth (for direct use)
+export { assessIdentity, detectBulkMail } from "./identity";
 
 // Conflict assessment
 export { assessConflict } from "./priority";
 
-// Evidence classification (legacy — use toEvidenceGroups instead)
-export { classifyEvidence } from "./evidence";
-
 // Link analysis
 export { summarizeLinks } from "./links";
-
-// Decision factors, explanation, summary
-export type { DecisionFactors } from "./decision";
-export { extractScoreDrivers, generateDecisionExplanation, extractDecisionFactors, buildAnalysisSummary } from "./decision";

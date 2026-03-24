@@ -1,5 +1,6 @@
 /**
- * Score driver extraction, decision factors, explanation, and analysis summary.
+ * Score drivers, decision factors, explanation, analysis summary,
+ * and the central analyzeResult() pipeline.
  */
 
 import type {
@@ -10,7 +11,12 @@ import type {
   PrioritizedSignal,
   NormalizedSignal,
   AnalysisSummary,
+  AnalysisResult,
 } from "./types";
+import { assessIdentity } from "./identity";
+import { summarizeLinks } from "./links";
+import { normalizeSignals, toPrioritizedSignals, toEvidenceGroups } from "./normalize";
+import { assessConflict } from "./priority";
 
 // ─── Score Drivers ──────────────────────────────────────────────────────────
 
@@ -68,59 +74,76 @@ export function extractDecisionFactors(signals: PrioritizedSignal[]): DecisionFa
 
 // ─── Decision Explanation ───────────────────────────────────────────────────
 
+/**
+ * Generates a decision explanation from normalized signals and conflict.
+ *
+ * Derives text from:
+ * - PrioritizedSignal[] (auth status, link status from signal domains)
+ * - ConflictAssessment (conflict explanation, bulk downgrade)
+ * - assessment.analyst_summary (whether to suppress generated text)
+ */
 export function generateDecisionExplanation(
-  result: any,
-  identity: IdentityAssessment,
-  linkStats: LinkStats,
-  conflict: ConflictAssessment
+  signals: PrioritizedSignal[],
+  conflict: ConflictAssessment,
+  hasAnalystSummary: boolean
 ): string | null {
-  const a = result.assessment;
-  if (!a) return null;
-  if (a.analyst_summary && !conflict.hasConflict) return null;
+  if (hasAnalystSummary && !conflict.hasConflict) return null;
 
   const parts: string[] = [];
 
-  const authPassed = identity.authSignals.filter((s) => s.status === "pass");
-  const authFailed = identity.authSignals.filter((s) => s.status === "fail");
-  if (authPassed.length > 0 && authFailed.length === 0) {
-    parts.push(`Authentifizierung (${authPassed.map((s) => s.protocol).join(", ")}) ist valide.`);
-  } else if (authFailed.length > 0) {
-    parts.push(`Authentifizierung teilweise fehlgeschlagen (${authFailed.map((s) => s.protocol).join(", ")}).`);
+  // Auth summary from signals
+  const authPass = signals.filter((s) => s.domain === "auth" && s.direction === "positive");
+  const authFail = signals.filter((s) => s.domain === "auth" && s.direction === "negative" && s.tier >= 5);
+  if (authPass.length > 0 && authFail.length === 0) {
+    const protocols = authPass.map((s) => s.label.split(" ")[0]).join(", ");
+    parts.push(`Authentifizierung (${protocols}) ist valide.`);
+  } else if (authFail.length > 0) {
+    const protocols = authFail.map((s) => s.label.split(" ")[0]).join(", ");
+    parts.push(`Authentifizierung teilweise fehlgeschlagen (${protocols}).`);
   }
 
-  if (linkStats.total > 0) {
-    if (linkStats.malicious > 0) parts.push(`${linkStats.malicious} maliziöse Link-Bewertungen festgestellt.`);
-    else if (linkStats.criticalLinks.length > 0) parts.push(`${linkStats.criticalLinks.length} von ${linkStats.total} Links mit technischen Auffälligkeiten.`);
-    else parts.push(`Alle ${linkStats.total} Links reputationsmäßig unauffällig.`);
+  // Link summary from signals
+  const maliciousLink = signals.find((s) => s.key.startsWith("links:malicious"));
+  const structuralLink = signals.find((s) => s.key === "links:structural");
+  const cleanLink = signals.find((s) => s.key === "links:clean");
+  if (maliciousLink) {
+    parts.push(`${maliciousLink.label}.`);
+  } else if (structuralLink) {
+    parts.push(`${structuralLink.label}.`);
+  } else if (cleanLink) {
+    parts.push(`${cleanLink.label}.`);
   }
 
-  if (identity.isBulkSender && conflict.bulkDowngradeApplied) {
+  // Bulk / identity context from conflict
+  if (conflict.bulkDowngradeApplied) {
     parts.push("Domain-Abweichungen passen zu typischen Newsletter-Versandmustern.");
-  } else if (identity.isBulkSender && conflict.bulkDowngradeBlocked) {
+  } else if (conflict.bulkDowngradeBlocked) {
     parts.push("Newsletter-Kontext erkannt, aber Entschärfung nicht möglich.");
-  } else if (identity.consistency === "suspicious") {
-    parts.push("Kritische Inkonsistenzen in der Absenderidentität.");
+  } else {
+    const suspiciousIdentity = signals.find((s) => s.key === "identity:suspicious");
+    if (suspiciousIdentity) {
+      parts.push("Kritische Inkonsistenzen in der Absenderidentität.");
+    }
   }
 
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
-// ─── Analysis Summary (serializable, API/export-ready) ──────────────────────
+// ─── Analysis Summary (serializable) ────────────────────────────────────────
 
-/**
- * Builds a serializable analysis summary from NormalizedSignals.
- *
- * This can be:
- * - returned as API response
- * - included in JSON export
- * - used for backend-ready signal transfer
- */
 export function buildAnalysisSummary(
   normalizedSignals: NormalizedSignal[],
   factors: DecisionFactors,
-  conflict: ConflictAssessment
+  conflict: ConflictAssessment,
+  explanation: string | null,
+  classification: string | null,
+  analystSummary: string | null
 ): AnalysisSummary {
   return {
+    version: 1,
+    classification,
+    analystSummary,
+    explanation,
     signals: normalizedSignals.map((s) => ({
       key: s.key,
       canonicalKey: s.canonicalKey,
@@ -146,5 +169,61 @@ export function buildAnalysisSummary(
       explanation: conflict.explanation,
       bulkDowngradeApplied: conflict.bulkDowngradeApplied,
     },
+  };
+}
+
+// ─── Central Pipeline ───────────────────────────────────────────────────────
+
+/**
+ * Complete analysis pipeline. One call, one result.
+ *
+ * This is the single entry point for producing all analysis outputs
+ * from a raw backend result. UI components and export consume its output.
+ */
+export function analyzeResult(result: any): AnalysisResult {
+  const a = result.assessment;
+
+  // 1. Core extraction
+  const identity = assessIdentity(result);
+  const linkStats = summarizeLinks(result.links || []);
+
+  // 2. Normalize — single source of truth
+  const normalized = normalizeSignals(result, identity, linkStats, identity.isBulkSender);
+
+  // 3. Project views
+  const signals = toPrioritizedSignals(normalized);
+  const conflict = assessConflict(signals, identity);
+  const decisionFactors = extractDecisionFactors(signals);
+  const evidenceGroups = toEvidenceGroups(normalized);
+  const scoreDrivers = extractScoreDrivers(result);
+
+  // 4. Decision explanation — derived from signals and conflict
+  const explanation = generateDecisionExplanation(
+    signals,
+    conflict,
+    !!a?.analyst_summary
+  );
+
+  // 5. Serializable summary
+  const summary = buildAnalysisSummary(
+    normalized,
+    decisionFactors,
+    conflict,
+    explanation,
+    a?.classification || null,
+    a?.analyst_summary || null
+  );
+
+  return {
+    identity,
+    linkStats,
+    normalized,
+    signals,
+    conflict,
+    decisionFactors,
+    evidenceGroups,
+    scoreDrivers,
+    explanation,
+    summary,
   };
 }

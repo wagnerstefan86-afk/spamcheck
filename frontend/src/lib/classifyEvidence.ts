@@ -1,6 +1,6 @@
 /**
- * Backward-compatibility re-export.
- * All logic lives in lib/analysis/*.ts modules.
+ * Re-export from analysis module.
+ * Components import types from here for convenience.
  */
 export type {
   NormalizedSignal,
@@ -15,14 +15,15 @@ export type {
   PrioritizedSignal,
   ConflictAssessment,
   AnalysisSummary,
+  AnalysisResult,
 } from "./analysis";
 
 export {
+  analyzeResult,
   assessIdentity,
   summarizeLinks,
   extractScoreDrivers,
   assessConflict,
-  classifyEvidence,
   generateDecisionExplanation,
   extractDecisionFactors,
   normalizeSignals,

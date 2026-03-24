@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { normalizeSignals, toPrioritizedSignals, toEvidenceGroups, deriveCanonicalKey } from "../normalize";
 import { assessIdentity } from "../identity";
 import { summarizeLinks } from "../links";
-import { extractDecisionFactors, buildAnalysisSummary } from "../decision";
+import { extractDecisionFactors, buildAnalysisSummary, analyzeResult } from "../decision";
 import { assessConflict } from "../priority";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -185,9 +185,7 @@ describe("toPrioritizedSignals", () => {
     const normalized = normalizeSignals(result, identity, linkStats, false);
     const prioritized = toPrioritizedSignals(normalized);
 
-    // "evidence:0" is not promotable → excluded
     expect(prioritized.find((s) => s.key === "evidence:0")).toBeUndefined();
-    // Auth signals are promotable → included
     expect(prioritized.find((s) => s.key === "auth:spf:pass")).toBeDefined();
   });
 
@@ -220,18 +218,14 @@ describe("toEvidenceGroups", () => {
     const normalized = normalizeSignals(result, identity, linkStats, false);
     const groups = toEvidenceGroups(normalized);
 
-    // Header finding has evidenceText → included
     const all = [...groups.critical, ...groups.noteworthy, ...groups.positive, ...groups.context];
     expect(all.find((i) => i.key === "auth:spf:pass")).toBeDefined();
-
-    // Auth-result derived signals have no evidenceText → excluded
-    // (they appear as identity:consistent etc. which do have evidenceText)
   });
 });
 
-// ─── AnalysisSummary ────────────────────────────────────────────────────────
+// ─── AnalysisSummary via analyzeResult ──────────────────────────────────────
 
-describe("buildAnalysisSummary", () => {
+describe("buildAnalysisSummary (via analyzeResult)", () => {
   it("produces a serializable summary with all fields", () => {
     const result = makeResult({
       authentication_results: "spf=pass; dkim=pass; dmarc=pass",
@@ -239,27 +233,18 @@ describe("buildAnalysisSummary", () => {
         { id: "HDR-001", severity: "info", title: "SPF bestanden", detail: "pass" },
       ],
     });
-    const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const normalized = normalizeSignals(result, identity, linkStats, false);
-    const prioritized = toPrioritizedSignals(normalized);
-    const factors = extractDecisionFactors(prioritized);
-    const conflict = assessConflict(prioritized, identity);
+    const { summary } = analyzeResult(result);
 
-    const summary = buildAnalysisSummary(normalized, factors, conflict);
-
-    // Should be JSON-serializable (no Sets, no functions)
     const json = JSON.stringify(summary);
     expect(json).toBeDefined();
     const parsed = JSON.parse(json);
 
-    // Structure checks
+    expect(parsed.version).toBe(1);
     expect(parsed.signals.length).toBeGreaterThan(0);
     expect(parsed.decisionFactors.positive.length).toBeGreaterThan(0);
     expect(Array.isArray(parsed.promotedKeys)).toBe(true);
     expect(typeof parsed.conflict.hasConflict).toBe("boolean");
 
-    // Source references should be present
     const spfSignal = parsed.signals.find((s: any) => s.key === "auth:spf:pass" && s.sourceType === "auth_result");
     expect(spfSignal).toBeDefined();
     expect(spfSignal.sourceRef).toBe("auth:spf");
@@ -270,17 +255,19 @@ describe("buildAnalysisSummary", () => {
     const result = makeResult({
       sender: { from_address: "a@x.com", reply_to: "b@y.com", return_path: null, to: null, date: null, message_id: null },
     });
-    const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const normalized = normalizeSignals(result, identity, linkStats, false);
-    const prioritized = toPrioritizedSignals(normalized);
-    const factors = extractDecisionFactors(prioritized);
-    const conflict = assessConflict(prioritized, identity);
-
-    const summary = buildAnalysisSummary(normalized, factors, conflict);
+    const { summary } = analyzeResult(result);
     const mismatch = summary.signals.find((s) => s.key === "identity:mismatch");
     expect(mismatch).toBeDefined();
     expect(mismatch!.downgradeEligible).toBe(true);
+  });
+
+  it("includes classification and analystSummary", () => {
+    const result = makeResult({
+      assessment: { classification: "phishing", analyst_summary: "Clearly malicious.", evidence: [] },
+    });
+    const { summary } = analyzeResult(result);
+    expect(summary.classification).toBe("phishing");
+    expect(summary.analystSummary).toBe("Clearly malicious.");
   });
 });
 
@@ -300,9 +287,7 @@ describe("Canonical key grouping", () => {
     const normalized = normalizeSignals(result, identity, linkStats, false);
 
     const spfSignals = normalized.filter((s) => s.canonicalKey === "auth:spf");
-    // Multiple sources (auth_result, header_finding, llm_evidence) all under same canonical
     expect(spfSignals.length).toBeGreaterThanOrEqual(2);
-    // All share the same canonical key
     const canonicals = new Set(spfSignals.map((s) => s.canonicalKey));
     expect(canonicals.size).toBe(1);
   });
@@ -318,21 +303,14 @@ describe("Promotion/dedup regression", () => {
         { id: "HDR-002", severity: "info", title: "DKIM bestanden", detail: "pass" },
       ],
     });
-    const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const normalized = normalizeSignals(result, identity, linkStats, false);
-    const prioritized = toPrioritizedSignals(normalized);
-    const factors = extractDecisionFactors(prioritized);
-    const groups = toEvidenceGroups(normalized);
+    const { decisionFactors, evidenceGroups } = analyzeResult(result);
 
-    // SPF and DKIM pass should be promoted
-    expect(factors.promotedKeys.has("auth:spf:pass")).toBe(true);
-    expect(factors.promotedKeys.has("auth:dkim:pass")).toBe(true);
+    expect(decisionFactors.promotedKeys.has("auth:spf:pass")).toBe(true);
+    expect(decisionFactors.promotedKeys.has("auth:dkim:pass")).toBe(true);
 
-    // Evidence items with those keys exist
-    const allItems = [...groups.critical, ...groups.noteworthy, ...groups.positive, ...groups.context];
+    const allItems = [...evidenceGroups.critical, ...evidenceGroups.noteworthy, ...evidenceGroups.positive, ...evidenceGroups.context];
     const spfEvidence = allItems.find((i) => i.key === "auth:spf:pass");
     expect(spfEvidence).toBeDefined();
-    expect(factors.promotedKeys.has(spfEvidence!.key)).toBe(true);
+    expect(decisionFactors.promotedKeys.has(spfEvidence!.key)).toBe(true);
   });
 });

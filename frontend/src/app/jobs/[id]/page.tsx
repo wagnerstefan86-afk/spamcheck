@@ -61,18 +61,19 @@ export default function JobPage() {
     return () => { active = false; };
   }, [pollStatus, fetchResult]);
 
-  const downloadExport = async (analysisSummary: AnalysisSummary) => {
+  const downloadExport = async (summary: AnalysisSummary) => {
     try {
-      // Fetch raw backend data
-      const { data: rawExport } = await axios.get(`${API}/api/jobs/${jobId}/export`);
+      const { data: rawBackend } = await axios.get(`${API}/api/jobs/${jobId}/export`);
 
-      // Enrich with normalized analysis
-      const enrichedExport = {
-        ...rawExport,
-        analysis_summary: analysisSummary,
+      // Export structure: normalized analysis as primary, raw data as secondary
+      const exportData = {
+        // Primary: the normalized, fachlich interpretierte Sicht
+        analysis_summary: summary,
+        // Secondary: raw backend data for debugging / full audit
+        raw_backend_result: rawBackend,
       };
 
-      const blob = new Blob([JSON.stringify(enrichedExport, null, 2)], { type: "application/json" });
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;

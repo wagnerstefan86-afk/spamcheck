@@ -9,18 +9,7 @@ import LinkSummary from "./LinkSummary";
 import SenderInfo from "./SenderInfo";
 import ScoreDetails from "./ScoreDetails";
 import Accordion from "./Accordion";
-import {
-  assessIdentity,
-  normalizeSignals,
-  toPrioritizedSignals,
-  toEvidenceGroups,
-  assessConflict,
-  summarizeLinks,
-  extractScoreDrivers,
-  extractDecisionFactors,
-  generateDecisionExplanation,
-  buildAnalysisSummary,
-} from "../lib/analysis";
+import { analyzeResult } from "../lib/analysis";
 import type { AnalysisSummary } from "../lib/analysis";
 
 type Props = {
@@ -31,36 +20,8 @@ type Props = {
 export default function ResultView({ result, onDownload }: Props) {
   const a = result.assessment;
 
-  // 1. Core analysis
-  const identity = useMemo(() => assessIdentity(result), [result]);
-  const linkStats = useMemo(() => summarizeLinks(result.links || []), [result.links]);
-
-  // 2. Normalize → single source of truth
-  const normalized = useMemo(
-    () => normalizeSignals(result, identity, linkStats, identity.isBulkSender),
-    [result, identity, linkStats]
-  );
-
-  // 3. Project views from normalized signals
-  const signals = useMemo(() => toPrioritizedSignals(normalized), [normalized]);
-  const conflict = useMemo(() => assessConflict(signals, identity), [signals, identity]);
-  const decisionFactors = useMemo(() => extractDecisionFactors(signals), [signals]);
-  const evidenceGroups = useMemo(() => toEvidenceGroups(normalized), [normalized]);
-
-  // 4. Score drivers (from raw det findings, independent of normalization)
-  const scoreDrivers = useMemo(() => extractScoreDrivers(result), [result]);
-
-  // 5. Decision explanation
-  const generatedExplanation = useMemo(
-    () => generateDecisionExplanation(result, identity, linkStats, conflict),
-    [result, identity, linkStats, conflict]
-  );
-
-  // 6. Serializable summary (for export)
-  const analysisSummary = useMemo(
-    () => buildAnalysisSummary(normalized, decisionFactors, conflict),
-    [normalized, decisionFactors, conflict]
-  );
+  // Single pipeline call — all views derived from one analysis
+  const analysis = useMemo(() => analyzeResult(result), [result]);
 
   return (
     <div className="space-y-4">
@@ -91,31 +52,31 @@ export default function ResultView({ result, onDownload }: Props) {
       <DecisionHeader assessment={a} />
 
       {/* ── 2. RATIONALE (compact, one block) ────────────────── */}
-      {a && (a.analyst_summary || generatedExplanation || a.rationale) && (
+      {a && (a.analyst_summary || analysis.explanation || a.rationale) && (
         <div className="card py-3">
           <p className="text-xs text-text-secondary uppercase tracking-wider font-semibold mb-1.5">Kurzbegründung</p>
           {a.analyst_summary && (
             <p className="text-sm text-text-primary leading-relaxed">{a.analyst_summary}</p>
           )}
-          {generatedExplanation && (
+          {analysis.explanation && (
             <p className={`text-sm leading-relaxed ${a.analyst_summary ? "text-text-primary/60 mt-1" : "text-text-primary"}`}>
-              {generatedExplanation}
+              {analysis.explanation}
             </p>
           )}
-          {a.rationale && a.rationale !== a.analyst_summary && !generatedExplanation && !a.analyst_summary && (
+          {a.rationale && a.rationale !== a.analyst_summary && !analysis.explanation && !a.analyst_summary && (
             <p className="text-sm text-text-primary/70 leading-relaxed">{a.rationale}</p>
           )}
         </div>
       )}
 
       {/* ── 3. DECISION FACTORS (belastend / entlastend) ─────── */}
-      <DecisionFactors factors={decisionFactors} conflict={conflict} />
+      <DecisionFactors factors={analysis.decisionFactors} conflict={analysis.conflict} />
 
       {/* ── 4. IDENTITY & AUTH ───────────────────────────────── */}
-      <IdentityBlock identity={identity} />
+      <IdentityBlock identity={analysis.identity} />
 
       {/* ── 5. SUPPORTING EVIDENCE (collapsed, deduplicated) ── */}
-      <EvidenceGroups groups={evidenceGroups} promotedKeys={decisionFactors.promotedKeys} />
+      <EvidenceGroups groups={analysis.evidenceGroups} promotedKeys={analysis.decisionFactors.promotedKeys} />
 
       {/* Warnings */}
       {result.warnings?.length > 0 && (
@@ -140,11 +101,11 @@ export default function ResultView({ result, onDownload }: Props) {
       <SenderInfo result={result} />
 
       {/* ── 7. LINK SUMMARY ──────────────────────────────────── */}
-      <LinkSummary links={result.links || []} stats={linkStats} />
+      <LinkSummary links={result.links || []} stats={analysis.linkStats} />
 
       {/* ── 8. SCORES (secondary, collapsed) ─────────────────── */}
       {result.deterministic_scores && (
-        <ScoreDetails scores={result.deterministic_scores} drivers={scoreDrivers} />
+        <ScoreDetails scores={result.deterministic_scores} drivers={analysis.scoreDrivers} />
       )}
 
       {/* ── 9. TECHNICAL DETAILS (collapsed) ─────────────────── */}
@@ -175,7 +136,7 @@ export default function ResultView({ result, onDownload }: Props) {
       {/* Export */}
       <div className="flex justify-center pt-2 pb-4">
         <button
-          onClick={() => onDownload(analysisSummary)}
+          onClick={() => onDownload(analysis.summary)}
           className="inline-flex items-center gap-2 px-6 py-2.5 bg-white border border-gray-200 rounded-xl text-sm font-medium text-text-primary hover:bg-gray-50 hover:border-gray-300 active:scale-[0.98] transition-all shadow-sm"
         >
           <svg className="w-4 h-4 text-text-secondary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
