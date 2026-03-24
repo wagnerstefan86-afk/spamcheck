@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { LinkStats } from "../lib/classifyEvidence";
+import type { LinkStats, CriticalLink } from "../lib/classifyEvidence";
 
 type Props = {
   links: any[];
@@ -14,6 +14,7 @@ export default function LinkSummary({ links, stats }: Props) {
   if (links.length === 0) return null;
 
   const hasCritical = stats.criticalLinks.length > 0;
+  const nonCriticalCount = links.length - stats.criticalLinks.length;
 
   return (
     <div className="card">
@@ -38,43 +39,38 @@ export default function LinkSummary({ links, stats }: Props) {
         )}
       </div>
 
-      {/* Critical links shown directly */}
+      {/* Critical links with explicit reasons */}
       {hasCritical && (
-        <div className="mt-3 space-y-2">
-          {stats.criticalLinks.map((link: any) => {
-            const flags: string[] = [];
-            if (link.is_ip_literal) flags.push("IP-Literal");
-            if (link.is_punycode) flags.push("Punycode");
-            if (link.is_shortener) flags.push("Shortener");
-            if (link.has_display_mismatch) flags.push("Display-Mismatch");
-            if (link.is_suspicious_tld) flags.push("Verd. TLD");
-
-            return (
-              <div key={link.id} className="px-3 py-2.5 rounded-xl border-l-[3px] border-red-500 bg-red-50/50">
-                <p className="text-xs text-text-primary break-all font-mono leading-relaxed">{link.normalized_url}</p>
-                {flags.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5 mt-1.5">
-                    {flags.map((f) => (
-                      <span key={f} className="px-2 py-0.5 rounded-md text-[11px] font-medium badge-amber">{f}</span>
-                    ))}
-                  </div>
-                )}
-                {link.external_checks?.map((c: any, ci: number) => (
-                  <div key={ci} className="mt-1 text-xs text-text-secondary">
-                    <span className="font-semibold">{c.service}:</span>{" "}
-                    {c.status === "completed"
-                      ? `${c.malicious_count} malicious, ${c.suspicious_count} suspicious`
-                      : c.status}
+        <div className="mt-4 space-y-2.5">
+          <p className="text-[11px] text-red-600 uppercase tracking-wider font-semibold">
+            Auffällige Links ({stats.criticalLinks.length})
+          </p>
+          {stats.criticalLinks.map((cl: CriticalLink, idx: number) => (
+            <div key={cl.link.id || idx} className="px-3.5 py-3 rounded-xl border border-red-200 bg-red-50/50">
+              <p className="text-xs text-text-primary break-all font-mono leading-relaxed">{cl.link.normalized_url}</p>
+              {cl.link.display_text && cl.link.display_text !== cl.link.normalized_url && (
+                <p className="text-[11px] text-text-tertiary mt-1">
+                  Angezeigt als: <span className="text-text-secondary">{cl.link.display_text}</span>
+                </p>
+              )}
+              {/* Explicit reasons WHY this link is critical */}
+              <div className="mt-2 space-y-1">
+                {cl.reasons.map((reason, ri) => (
+                  <div key={ri} className="flex items-start gap-1.5 text-xs">
+                    <svg className="w-3 h-3 text-red-500 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01" />
+                    </svg>
+                    <span className="text-red-700/80">{reason}</span>
                   </div>
                 ))}
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
       )}
 
-      {/* Expandable full list */}
-      {links.length > stats.criticalLinks.length && (
+      {/* Expandable full list for non-critical links */}
+      {nonCriticalCount > 0 && (
         <div className="mt-3">
           <button
             onClick={() => setExpanded(!expanded)}
@@ -86,27 +82,27 @@ export default function LinkSummary({ links, stats }: Props) {
             >
               <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
             </svg>
-            {expanded ? "Alle Links ausblenden" : `Alle ${links.length} Links anzeigen`}
+            {expanded ? "Unauffällige Links ausblenden" : `${nonCriticalCount} unauffällige Links anzeigen`}
           </button>
 
           {expanded && (
             <div className="mt-2.5 space-y-1.5 max-h-80 overflow-y-auto">
               {links.map((link: any) => {
-                const isCritical = stats.criticalLinks.some((cl: any) => cl.id === link.id);
-                if (isCritical) return null; // already shown above
+                const isCritical = stats.criticalLinks.some((cl) => cl.link.id === link.id);
+                if (isCritical) return null;
 
-                const flags: string[] = [];
-                if (link.is_tracking_heavy) flags.push("Tracking");
-                if (link.is_safelink) flags.push("SafeLink");
-                if (link.is_shortener) flags.push("Shortener");
+                const tags: string[] = [];
+                if (link.is_tracking_heavy) tags.push("Tracking");
+                if (link.is_safelink) tags.push("SafeLink");
+                if (link.is_shortener) tags.push("Shortener");
 
                 return (
                   <div key={link.id} className="px-3 py-2 rounded-lg bg-gray-50 border-l-2 border-emerald-400/50">
                     <p className="text-xs text-text-primary/70 break-all font-mono">{link.normalized_url}</p>
-                    {flags.length > 0 && (
+                    {tags.length > 0 && (
                       <div className="flex flex-wrap gap-1 mt-1">
-                        {flags.map((f) => (
-                          <span key={f} className="px-1.5 py-0.5 rounded text-[10px] font-medium badge-gray">{f}</span>
+                        {tags.map((t) => (
+                          <span key={t} className="px-1.5 py-0.5 rounded text-[10px] font-medium badge-gray">{t}</span>
                         ))}
                       </div>
                     )}

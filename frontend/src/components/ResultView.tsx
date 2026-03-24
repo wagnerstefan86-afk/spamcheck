@@ -3,11 +3,18 @@
 import { useMemo } from "react";
 import DecisionHeader from "./DecisionHeader";
 import EvidenceGroups from "./EvidenceGroups";
+import IdentityBlock from "./IdentityBlock";
 import LinkSummary from "./LinkSummary";
 import SenderInfo from "./SenderInfo";
 import ScoreDetails from "./ScoreDetails";
 import Accordion from "./Accordion";
-import { classifyEvidence, summarizeLinks } from "../lib/classifyEvidence";
+import {
+  classifyEvidence,
+  summarizeLinks,
+  assessIdentity,
+  extractScoreDrivers,
+  generateDecisionExplanation,
+} from "../lib/classifyEvidence";
 
 type Props = {
   result: any;
@@ -19,6 +26,12 @@ export default function ResultView({ result, onDownload }: Props) {
 
   const evidenceGroups = useMemo(() => classifyEvidence(result), [result]);
   const linkStats = useMemo(() => summarizeLinks(result.links || []), [result.links]);
+  const identity = useMemo(() => assessIdentity(result), [result]);
+  const scoreDrivers = useMemo(() => extractScoreDrivers(result), [result]);
+  const generatedExplanation = useMemo(
+    () => generateDecisionExplanation(result, identity, linkStats),
+    [result, identity, linkStats]
+  );
 
   return (
     <div className="space-y-5">
@@ -48,20 +61,26 @@ export default function ResultView({ result, onDownload }: Props) {
       {/* 1. DECISION HEADER — Above the fold */}
       <DecisionHeader assessment={a} />
 
-      {/* 2. SHORT RATIONALE — 1-3 sentence summary */}
-      {a && (a.rationale || a.analyst_summary) && (
+      {/* 2. DECISION EXPLANATION — Short, data-driven */}
+      {a && (
         <div className="card">
           <p className="text-xs text-text-secondary uppercase tracking-wider font-semibold mb-2">Kurzbegründung</p>
           {a.analyst_summary && (
             <p className="text-sm text-text-primary leading-relaxed">{a.analyst_summary}</p>
           )}
-          {a.rationale && a.rationale !== a.analyst_summary && (
+          {/* Show generated explanation if no LLM summary, or as supplement */}
+          {generatedExplanation && (
+            <p className={`text-sm leading-relaxed ${a.analyst_summary ? "text-text-primary/60 mt-1.5" : "text-text-primary"}`}>
+              {generatedExplanation}
+            </p>
+          )}
+          {a.rationale && a.rationale !== a.analyst_summary && !generatedExplanation && (
             <p className="text-sm text-text-primary/70 leading-relaxed mt-1.5">{a.rationale}</p>
           )}
         </div>
       )}
 
-      {/* 3. EVIDENCE GROUPS — Positive / Noteworthy / Critical */}
+      {/* 3. EVIDENCE GROUPS — Critical → Noteworthy → Positive → Context */}
       <EvidenceGroups groups={evidenceGroups} />
 
       {/* Warnings — only if present */}
@@ -83,18 +102,21 @@ export default function ResultView({ result, onDownload }: Props) {
         </div>
       )}
 
-      {/* 4. SENDER & CONTEXT — Compact */}
+      {/* 4. IDENTITY & AUTH — Compact verdichteter Block */}
+      <IdentityBlock identity={identity} />
+
+      {/* 5. SENDER CONTEXT — Compact */}
       <SenderInfo result={result} />
 
-      {/* 5. LINK SUMMARY — Compact with expandable details */}
+      {/* 6. LINK SUMMARY — Compact with reasons for critical links */}
       <LinkSummary links={result.links || []} stats={linkStats} />
 
-      {/* 6. SCORE DETAILS — Secondary, collapsible */}
+      {/* 7. SCORE DETAILS — Secondary, with drivers */}
       {result.deterministic_scores && (
-        <ScoreDetails scores={result.deterministic_scores} />
+        <ScoreDetails scores={result.deterministic_scores} drivers={scoreDrivers} />
       )}
 
-      {/* 7. TECHNICAL DETAILS — Collapsed by default */}
+      {/* 8. TECHNICAL DETAILS — Collapsed by default */}
       <Accordion title="Technische Details">
         <div className="text-xs text-text-secondary space-y-2.5">
           <p><strong className="text-text-primary">Authentication-Results:</strong> {result.authentication_results || "\u2014"}</p>
