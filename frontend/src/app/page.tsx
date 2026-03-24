@@ -2,9 +2,7 @@
 
 import { useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import axios from "axios";
-
-const API = "";
+import axios, { AxiosError } from "axios";
 
 export default function UploadPage() {
   const router = useRouter();
@@ -33,17 +31,43 @@ export default function UploadPage() {
     }
   };
 
+  const removeFile = () => {
+    setFile(null);
+    setError("");
+    // Reset file input so the same file can be re-selected
+    const input = document.getElementById("file-input") as HTMLInputElement;
+    if (input) input.value = "";
+  };
+
   const submit = async () => {
     if (!file) return;
     setUploading(true);
     setError("");
+
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const { data } = await axios.post(`${API}/api/upload`, formData);
+
+      console.log("[upload] Starting upload:", file.name, `(${(file.size / 1024).toFixed(1)} KB)`);
+
+      const { data } = await axios.post("/api/upload", formData);
+
+      console.log("[upload] Success, job ID:", data.id);
       router.push(`/jobs/${data.id}`);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || "Upload fehlgeschlagen.");
+    } catch (err) {
+      const axiosErr = err as AxiosError<{ detail?: string }>;
+
+      // Extract the most specific error message available
+      const errorMessage = classifyUploadError(axiosErr);
+
+      console.error("[upload] Failed:", {
+        status: axiosErr.response?.status,
+        detail: axiosErr.response?.data?.detail,
+        message: axiosErr.message,
+        code: axiosErr.code,
+      });
+
+      setError(errorMessage);
       setUploading(false);
     }
   };
@@ -80,7 +104,7 @@ export default function UploadPage() {
           onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
           onDragLeave={() => setDragActive(false)}
           onDrop={handleDrop}
-          onClick={() => document.getElementById("file-input")?.click()}
+          onClick={() => !file && document.getElementById("file-input")?.click()}
         >
           <input
             id="file-input"
@@ -100,6 +124,13 @@ export default function UploadPage() {
               <p className="text-text-secondary text-sm mt-1">
                 {(file.size / 1024).toFixed(1)} KB
               </p>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); removeFile(); }}
+                className="mt-3 text-sm text-text-secondary hover:text-red-600 underline underline-offset-2 transition-colors"
+              >
+                Andere Datei wählen
+              </button>
             </div>
           ) : (
             <div>
@@ -144,4 +175,46 @@ export default function UploadPage() {
       </div>
     </div>
   );
+}
+
+
+/**
+ * Classify an upload error into a specific, user-facing message.
+ * Replaces the old generic "Upload fehlgeschlagen."
+ */
+function classifyUploadError(err: AxiosError<{ detail?: string }>): string {
+  // Backend returned a structured error
+  if (err.response?.data?.detail) {
+    return err.response.data.detail;
+  }
+
+  const status = err.response?.status;
+
+  // HTTP status-based classification
+  if (status === 413) {
+    return "Datei zu groß. Maximum: 25 MB.";
+  }
+  if (status === 400) {
+    return "Ungültige Anfrage. Bitte prüfen Sie das Dateiformat (.eml oder .msg).";
+  }
+  if (status === 502) {
+    return "Backend nicht erreichbar. Bitte prüfen Sie, ob der Analyse-Service läuft.";
+  }
+  if (status === 503) {
+    return "Service vorübergehend nicht verfügbar. Bitte versuchen Sie es in wenigen Sekunden erneut.";
+  }
+  if (status && status >= 500) {
+    return `Serverfehler (HTTP ${status}). Bitte versuchen Sie es erneut.`;
+  }
+
+  // Network-level errors (no response received)
+  if (err.code === "ERR_NETWORK" || err.code === "ECONNREFUSED") {
+    return "Keine Verbindung zum Server. Bitte prüfen Sie Ihre Netzwerkverbindung.";
+  }
+  if (err.code === "ECONNABORTED") {
+    return "Upload-Timeout. Die Verbindung wurde unterbrochen.";
+  }
+
+  // Fallback — include error code for debugging
+  return `Upload fehlgeschlagen${err.code ? ` (${err.code})` : ""}. Bitte versuchen Sie es erneut.`;
 }

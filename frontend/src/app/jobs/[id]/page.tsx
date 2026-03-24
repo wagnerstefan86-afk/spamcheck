@@ -7,8 +7,6 @@ import StatusView from "@/components/StatusView";
 import ResultView from "@/components/ResultView";
 import type { AnalysisSummary } from "@/lib/analysis";
 
-const API = "";
-
 type JobStatus = {
   id: string;
   filename: string;
@@ -26,20 +24,22 @@ export default function JobPage() {
 
   const pollStatus = useCallback(async () => {
     try {
-      const { data } = await axios.get(`${API}/api/jobs/${jobId}`);
+      const { data } = await axios.get(`/api/jobs/${jobId}`);
       setStatus(data);
       return data.status;
-    } catch {
-      setError("Job-Status konnte nicht abgerufen werden.");
+    } catch (err) {
+      console.error("[poll] Status fetch failed:", err);
+      setError("Job-Status konnte nicht abgerufen werden. Backend möglicherweise nicht erreichbar.");
       return "failed";
     }
   }, [jobId]);
 
   const fetchResult = useCallback(async () => {
     try {
-      const { data } = await axios.get(`${API}/api/jobs/${jobId}/result`);
+      const { data } = await axios.get(`/api/jobs/${jobId}/result`);
       setResult(data);
-    } catch {
+    } catch (err) {
+      console.error("[result] Result fetch failed:", err);
       setError("Ergebnis konnte nicht geladen werden.");
     }
   }, [jobId]);
@@ -63,13 +63,10 @@ export default function JobPage() {
 
   const downloadExport = async (summary: AnalysisSummary) => {
     try {
-      const { data: rawBackend } = await axios.get(`${API}/api/jobs/${jobId}/export`);
+      const { data: rawBackend } = await axios.get(`/api/jobs/${jobId}/export`);
 
-      // Export structure: normalized analysis as primary, raw data as secondary
       const exportData = {
-        // Primary: the normalized, fachlich interpretierte Sicht
         analysis_summary: summary,
-        // Secondary: raw backend data for debugging / full audit
         raw_backend_result: rawBackend,
       };
 

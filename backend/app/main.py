@@ -56,24 +56,37 @@ async def upload_email(
     db: Session = Depends(get_db),
 ):
     settings = get_settings()
+    logger.info("Upload started: filename=%s, content_type=%s", file.filename, file.content_type)
 
     if not file.filename:
+        logger.warning("Upload rejected: no filename")
         raise HTTPException(400, "Kein Dateiname angegeben")
 
     lower = file.filename.lower()
     if not (lower.endswith(".eml") or lower.endswith(".msg")):
+        logger.warning("Upload rejected: unsupported format: %s", file.filename)
         raise HTTPException(400, "Nur .eml und .msg Dateien werden unterstützt")
 
     raw_bytes = await file.read()
+    size_kb = len(raw_bytes) / 1024
+    logger.info("File received: %s (%.1f KB)", file.filename, size_kb)
+
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
     if len(raw_bytes) > max_bytes:
-        raise HTTPException(400, f"Datei zu groß (max {settings.max_upload_size_mb} MB)")
+        logger.warning("Upload rejected: file too large (%.1f KB > %d MB)", size_kb, settings.max_upload_size_mb)
+        raise HTTPException(400, f"Datei zu groß ({size_kb:.0f} KB). Maximum: {settings.max_upload_size_mb} MB.")
+
+    if len(raw_bytes) == 0:
+        logger.warning("Upload rejected: empty file: %s", file.filename)
+        raise HTTPException(400, "Datei ist leer. Bitte laden Sie eine gültige .eml oder .msg Datei hoch.")
 
     job_id = str(uuid.uuid4())
     job = AnalysisJob(id=job_id, filename=file.filename, status="queued", warnings=[])
     db.add(job)
     db.commit()
     db.refresh(job)
+
+    logger.info("Job created: %s for file %s (%.1f KB)", job_id, file.filename, size_kb)
 
     # Launch background analysis
     asyncio.create_task(run_analysis(job_id, file.filename, raw_bytes))
