@@ -1,5 +1,5 @@
 /**
- * Score driver extraction, decision factors, and explanation generation.
+ * Score driver extraction, decision factors, explanation, and analysis summary.
  */
 
 import type {
@@ -8,6 +8,8 @@ import type {
   LinkStats,
   ConflictAssessment,
   PrioritizedSignal,
+  NormalizedSignal,
+  AnalysisSummary,
 } from "./types";
 
 // ─── Score Drivers ──────────────────────────────────────────────────────────
@@ -41,19 +43,11 @@ export function extractScoreDrivers(result: any): ScoreDriver[] {
 export type DecisionFactors = {
   negative: PrioritizedSignal[];
   positive: PrioritizedSignal[];
-  /**
-   * Set of signal keys promoted to the decision factors block.
-   * Used by EvidenceGroups for exact dedup (no text matching).
-   */
   promotedKeys: Set<string>;
 };
 
 const MAX_FACTORS = 4;
 
-/**
- * Extracts the top 2-4 positive and negative signals.
- * Provides promotedKeys (stable signal keys) for exact dedup.
- */
 export function extractDecisionFactors(signals: PrioritizedSignal[]): DecisionFactors {
   const negative = signals
     .filter((s) => s.direction === "negative" && s.tier >= 3)
@@ -82,7 +76,6 @@ export function generateDecisionExplanation(
 ): string | null {
   const a = result.assessment;
   if (!a) return null;
-
   if (a.analyst_summary && !conflict.hasConflict) return null;
 
   const parts: string[] = [];
@@ -96,13 +89,9 @@ export function generateDecisionExplanation(
   }
 
   if (linkStats.total > 0) {
-    if (linkStats.malicious > 0) {
-      parts.push(`${linkStats.malicious} maliziöse Link-Bewertungen festgestellt.`);
-    } else if (linkStats.criticalLinks.length > 0) {
-      parts.push(`${linkStats.criticalLinks.length} von ${linkStats.total} Links mit technischen Auffälligkeiten.`);
-    } else {
-      parts.push(`Alle ${linkStats.total} Links reputationsmäßig unauffällig.`);
-    }
+    if (linkStats.malicious > 0) parts.push(`${linkStats.malicious} maliziöse Link-Bewertungen festgestellt.`);
+    else if (linkStats.criticalLinks.length > 0) parts.push(`${linkStats.criticalLinks.length} von ${linkStats.total} Links mit technischen Auffälligkeiten.`);
+    else parts.push(`Alle ${linkStats.total} Links reputationsmäßig unauffällig.`);
   }
 
   if (identity.isBulkSender && conflict.bulkDowngradeApplied) {
@@ -114,4 +103,48 @@ export function generateDecisionExplanation(
   }
 
   return parts.length > 0 ? parts.join(" ") : null;
+}
+
+// ─── Analysis Summary (serializable, API/export-ready) ──────────────────────
+
+/**
+ * Builds a serializable analysis summary from NormalizedSignals.
+ *
+ * This can be:
+ * - returned as API response
+ * - included in JSON export
+ * - used for backend-ready signal transfer
+ */
+export function buildAnalysisSummary(
+  normalizedSignals: NormalizedSignal[],
+  factors: DecisionFactors,
+  conflict: ConflictAssessment
+): AnalysisSummary {
+  return {
+    signals: normalizedSignals.map((s) => ({
+      key: s.key,
+      canonicalKey: s.canonicalKey,
+      label: s.label,
+      severity: s.severity,
+      tier: s.tier,
+      direction: s.direction,
+      domain: s.domain,
+      category: s.category,
+      sourceType: s.sourceType,
+      sourceRef: s.sourceRef,
+      promotable: s.promotable,
+      downgradeEligible: s.downgradeEligible,
+    })),
+    decisionFactors: {
+      negative: factors.negative.map((s) => s.key),
+      positive: factors.positive.map((s) => s.key),
+    },
+    promotedKeys: Array.from(factors.promotedKeys),
+    conflict: {
+      hasConflict: conflict.hasConflict,
+      dominantSignalKey: conflict.dominantSignal?.key || null,
+      explanation: conflict.explanation,
+      bulkDowngradeApplied: conflict.bulkDowngradeApplied,
+    },
+  };
 }

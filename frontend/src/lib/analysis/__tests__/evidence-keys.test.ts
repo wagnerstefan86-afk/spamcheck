@@ -41,7 +41,7 @@ describe("Evidence key assignment", () => {
     const items = allItems(groups);
     const spfItem = items.find((i) => i.key === "auth:spf:pass");
     expect(spfItem).toBeDefined();
-    expect(spfItem!.source).toBe("header");
+    expect(spfItem!.source).toBe("header_finding");
   });
 
   it("assigns auth signal keys to header findings about DKIM fail", () => {

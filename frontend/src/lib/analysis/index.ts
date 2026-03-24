@@ -1,12 +1,10 @@
 /**
  * Analysis module — public API.
- *
- * Re-exports all types and functions needed by UI components.
- * Internal helpers (pattern tables, normalizers) stay encapsulated.
  */
 
-// Types
+// Core types
 export type {
+  NormalizedSignal,
   EvidenceSeverity,
   EvidenceItem,
   EvidenceGroups,
@@ -17,20 +15,27 @@ export type {
   ScoreDriver,
   PrioritizedSignal,
   ConflictAssessment,
+  SignalDomain,
+  SignalCategory,
+  SignalSourceType,
+  AnalysisSummary,
 } from "./types";
 
 // Identity & Auth
 export { assessIdentity, detectBulkMail } from "./identity";
 
-// Priority & Conflict
+// Central normalization
+export { normalizeSignals, toPrioritizedSignals, toEvidenceGroups, deriveCanonicalKey } from "./normalize";
+
+// Priority & Conflict (operates on PrioritizedSignal[])
 export { collectSignals, assessConflict } from "./priority";
 
-// Evidence classification
+// Evidence classification (legacy adapter)
 export { classifyEvidence } from "./evidence";
 
 // Link analysis
 export { summarizeLinks } from "./links";
 
-// Score drivers & Decision explanation & Decision factors
+// Decision factors, explanation, summary
 export type { DecisionFactors } from "./decision";
-export { extractScoreDrivers, generateDecisionExplanation, extractDecisionFactors } from "./decision";
+export { extractScoreDrivers, generateDecisionExplanation, extractDecisionFactors, buildAnalysisSummary } from "./decision";

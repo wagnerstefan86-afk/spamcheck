@@ -2,8 +2,8 @@
  * Backward-compatibility re-export.
  * All logic lives in lib/analysis/*.ts modules.
  */
-
 export type {
+  NormalizedSignal,
   EvidenceSeverity,
   EvidenceItem,
   EvidenceGroups,
@@ -14,6 +14,7 @@ export type {
   ScoreDriver,
   PrioritizedSignal,
   ConflictAssessment,
+  AnalysisSummary,
 } from "./analysis";
 
 export {
@@ -25,6 +26,10 @@ export {
   classifyEvidence,
   generateDecisionExplanation,
   extractDecisionFactors,
+  normalizeSignals,
+  toPrioritizedSignals,
+  toEvidenceGroups,
+  buildAnalysisSummary,
 } from "./analysis";
 
 export type { DecisionFactors } from "./analysis";
