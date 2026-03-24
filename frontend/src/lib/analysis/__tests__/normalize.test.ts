@@ -4,7 +4,6 @@ import { assessIdentity } from "../identity";
 import { summarizeLinks } from "../links";
 import { extractDecisionFactors, buildAnalysisSummary } from "../decision";
 import { assessConflict } from "../priority";
-import type { NormalizedSignal } from "../types";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 

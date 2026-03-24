@@ -1,21 +1,12 @@
 /**
- * Central signal normalization.
+ * Central signal normalization — the single source of truth for all signals.
  *
- * Transforms raw analysis sources into NormalizedSignal[].
- * This is the single transformation point — all downstream views
- * (PrioritizedSignal[], EvidenceGroups, DecisionFactors) derive from it.
+ * Raw sources → normalizeSignals() → NormalizedSignal[]
+ *   → toPrioritizedSignals() → assessConflict() / extractDecisionFactors()
+ *   → toEvidenceGroups() → UI
+ *   → buildAnalysisSummary() → Export / API
  *
- * ## Source mapping
- *
- * | Raw source               | sourceType       | Key pattern              |
- * |--------------------------|------------------|--------------------------|
- * | authentication_results   | auth_result      | auth:{proto}:{status}    |
- * | header_findings[]        | header_finding   | auth:*  / identity:*     |
- * | deterministic_findings[] | det_finding      | auth:*  / links:*        |
- * | link analysis            | link_analysis    | links:{type}[:{count}]   |
- * | sender domain comparison | identity_derived | identity:{status}        |
- * | assessment.evidence[]    | llm_evidence     | (mapped or evidence:{i}) |
- * | structured_headers       | bulk_detection   | bulk:detected            |
+ * No other module should independently collect or derive signals.
  */
 
 import type {
@@ -24,7 +15,6 @@ import type {
   PriorityTier,
   SignalDomain,
   SignalCategory,
-  SignalSourceType,
   IdentityAssessment,
   LinkStats,
   PrioritizedSignal,
@@ -32,53 +22,36 @@ import type {
   EvidenceGroups,
   PRIORITY_TIER,
 } from "./types";
-import { evaluateBulkDowngrade } from "./priority";
+import { evaluateBulkDowngradeFromRaw } from "./priority";
 
 // ─── Canonical Key ──────────────────────────────────────────────────────────
 
-/**
- * Derives the dedup group from a signal key.
- * "auth:spf:pass" → "auth:spf"
- * "links:malicious:3" → "links:malicious"
- * "identity:mismatch" → "identity:mismatch"
- */
 export function deriveCanonicalKey(key: string): string {
   const parts = key.split(":");
-  // For auth signals, canonical is domain:protocol (drop status)
   if (parts[0] === "auth" && parts.length >= 3) return `${parts[0]}:${parts[1]}`;
-  // For links with counts, drop the count
   if (parts[0] === "links" && parts.length >= 3) return `${parts[0]}:${parts[1]}`;
   return key;
 }
 
 // ─── Signal Key Mapping Tables ──────────────────────────────────────────────
-// Centralized: these tables define ALL semantic mappings from raw sources
-// to signal keys. Previously scattered across evidence.ts.
 
-/** Header finding title → signal key (if semantically equivalent) */
 const HEADER_FINDING_SIGNAL_MAP: Array<{ pattern: RegExp; key: string }> = [
-  // Auth pass
   { pattern: /spf.*(?:bestanden|pass)/i, key: "auth:spf:pass" },
   { pattern: /dkim.*(?:bestanden|pass)/i, key: "auth:dkim:pass" },
   { pattern: /dmarc.*(?:bestanden|pass)/i, key: "auth:dmarc:pass" },
-  // Auth fail
   { pattern: /spf.*(?:fehlgeschlagen|fail)/i, key: "auth:spf:fail" },
   { pattern: /dkim.*(?:fehlgeschlagen|fail)/i, key: "auth:dkim:fail" },
   { pattern: /dmarc.*(?:fehlgeschlagen|fail)/i, key: "auth:dmarc:fail" },
-  // Auth missing
   { pattern: /kein.*spf/i, key: "auth:spf:none" },
   { pattern: /kein.*dkim/i, key: "auth:dkim:none" },
   { pattern: /kein.*dmarc/i, key: "auth:dmarc:none" },
-  // Identity
   { pattern: /display.?name.*(?:inkonsistenz|spoof)/i, key: "identity:spoofing" },
   { pattern: /from.*reply.?to.*mismatch/i, key: "identity:mismatch" },
   { pattern: /from.*return.?path.*mismatch/i, key: "identity:mismatch" },
   { pattern: /return.?path.*mismatch/i, key: "identity:mismatch" },
-  // Bulk
   { pattern: /massen.*header|marketing.*header|bulk.*header/i, key: "bulk:detected" },
 ];
 
-/** Deterministic finding factor → signal key */
 const DET_FACTOR_SIGNAL_MAP: Record<string, string> = {
   spf_fail: "auth:spf:fail",
   spf_missing: "auth:spf:none",
@@ -97,7 +70,6 @@ const DET_FACTOR_SIGNAL_MAP: Record<string, string> = {
   bulk_headers: "bulk:detected",
 };
 
-/** LLM evidence text → signal key */
 const EVIDENCE_TEXT_SIGNAL_MAP: Array<{ pattern: RegExp; key: string }> = [
   { pattern: /spf.*(pass|erfolgreich|bestanden)/i, key: "auth:spf:pass" },
   { pattern: /dkim.*(pass|erfolgreich|bestanden)/i, key: "auth:dkim:pass" },
@@ -119,7 +91,7 @@ function matchSignalKey(text: string, map: Array<{ pattern: RegExp; key: string 
   return null;
 }
 
-// ─── Severity Classification Tables ─────────────────────────────────────────
+// ─── Severity Classification ────────────────────────────────────────────────
 
 const POSITIVE_FINDING = [/spf.*(?:bestanden|pass)/i, /dkim.*(?:bestanden|pass)/i, /dmarc.*(?:bestanden|pass)/i, /authentifizierung.*(?:erfolgreich|valide)/i];
 const CONTEXT_FINDING = [/massen.*header|marketing.*header|bulk.*header/i, /list.?unsubscribe/i, /hoher scl/i, /spam.*header.*(?:scl|bcl)/i, /lange received/i];
@@ -151,7 +123,7 @@ function classifyEvidenceTextSeverity(text: string): EvidenceSeverity {
   return "noteworthy";
 }
 
-// ─── Tier/Domain/Category derivation ────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function severityToTier(severity: EvidenceSeverity): PriorityTier {
   switch (severity) {
@@ -184,13 +156,51 @@ function severityToDirection(severity: EvidenceSeverity): "positive" | "negative
   return (severity === "positive" || severity === "context") ? "positive" : "negative";
 }
 
+function makeSignal(input: Omit<NormalizedSignal, "canonicalKey" | "direction"> & { direction?: "positive" | "negative" }): NormalizedSignal {
+  return {
+    ...input,
+    canonicalKey: deriveCanonicalKey(input.key),
+    direction: input.direction ?? severityToDirection(input.severity),
+  };
+}
+
+function classifyDetSeverity(factor: string, isBulk: boolean, bulkDowngradeAllowed: boolean): EvidenceSeverity | null {
+  if (/^(spf_fail|dkim_fail|dmarc_fail|display_name_spoof|vt_malicious)$/.test(factor)) return "critical";
+  if (/^(display_mismatch|ip_literal|punycode|suspicious_tld)$/.test(factor)) return "critical";
+  if (/^(spf_missing|dkim_missing)$/.test(factor)) return "noteworthy";
+  if (/^(header_mismatch)$/.test(factor)) return (isBulk && bulkDowngradeAllowed) ? "noteworthy" : "critical";
+  if (/^(header_mismatch_minor)$/.test(factor)) return (isBulk && bulkDowngradeAllowed) ? "context" : "noteworthy";
+  if (/^(vt_suspicious)$/.test(factor)) return "noteworthy";
+  if (/^(bulk_headers|spam_header|tracking_heavy)$/.test(factor)) return "context";
+  if (/^(url_shortener|many_domains)$/.test(factor)) return isBulk ? "context" : "noteworthy";
+  return null;
+}
+
+// ─── Pre-scan for hard criticals (bulk downgrade bootstrap) ─────────────────
+
+function hasHardCriticalIndicators(
+  identity: IdentityAssessment,
+  linkStats: LinkStats,
+  headerFindings: any[]
+): boolean {
+  // Auth failures
+  if (identity.authSignals.some((a) => a.status === "fail")) return true;
+  // Malicious links
+  if (linkStats.malicious > 0) return true;
+  // Display-name spoofing
+  if (headerFindings.some((f: any) => /display.?name.*(?:inkonsistenz|spoof)/i.test(f.title))) return true;
+  // Suspicious identity (auth fail + domain mismatch)
+  if (identity.consistency === "suspicious") return true;
+  return false;
+}
+
 // ─── Main Normalization ─────────────────────────────────────────────────────
 
 /**
- * Normalizes all raw analysis sources into a flat NormalizedSignal array.
+ * Single entry point for all signal derivation.
  *
- * This is the single entry point for all signal derivation.
- * The result can be projected into PrioritizedSignal[], EvidenceGroups, etc.
+ * All downstream views (PrioritizedSignal[], EvidenceGroups, DecisionFactors,
+ * ConflictAssessment, AnalysisSummary) are projections of this output.
  */
 export function normalizeSignals(
   result: any,
@@ -200,12 +210,12 @@ export function normalizeSignals(
 ): NormalizedSignal[] {
   const signals: NormalizedSignal[] = [];
   const seenCanonical = new Set<string>();
+  const headerFindings: any[] = result.header_findings || [];
 
-  // Compute bulk downgrade eligibility once
-  // We need PrioritizedSignals for the guard — bootstrap from identity/link signals
-  const bootstrapSignals = bootstrapPrioritySignals(identity, linkStats, result.header_findings || []);
+  // Compute bulk downgrade from raw inputs (no circular dependency)
+  const hasHardCritical = hasHardCriticalIndicators(identity, linkStats, headerFindings);
   const bulkDowngrade = isBulk
-    ? evaluateBulkDowngrade(bootstrapSignals, identity.authSignals)
+    ? evaluateBulkDowngradeFromRaw(identity.authSignals, hasHardCritical)
     : { allowed: false, reason: null };
   const bulkDowngradeAllowed = bulkDowngrade.allowed;
 
@@ -232,6 +242,10 @@ export function normalizeSignals(
   }
 
   // 2. Identity consistency
+  const identityDomains = [identity.fromDomain, identity.replyToDomain, identity.returnPathDomain].filter(Boolean);
+  const identitySourceRef = identityDomains.length > 0
+    ? `domains:${identityDomains.join(",")}`
+    : null;
   const identityKey = identity.consistency === "consistent" ? "identity:consistent"
     : identity.consistency === "suspicious" ? "identity:suspicious"
     : "identity:mismatch";
@@ -247,66 +261,88 @@ export function normalizeSignals(
     domain: "identity",
     category: "identity_consistency",
     sourceType: "identity_derived",
-    sourceRef: null,
+    sourceRef: identitySourceRef,
     evidenceText: identity.consistencyDetail,
     promotable: true,
     downgradeEligible: identity.consistency === "partial_mismatch",
   }));
 
-  // 3. Link signals
+  // 3. Link signals (with improved sourceRef)
   if (linkStats.malicious > 0) {
+    const maliciousUrls = linkStats.criticalLinks
+      .filter((cl) => cl.reasons.some((r) => /maliziös|malicious/i.test(r)))
+      .map((cl) => cl.link?.hostname || cl.link?.normalized_url)
+      .filter(Boolean)
+      .slice(0, 3);
     signals.push(makeSignal({
       key: `links:malicious:${linkStats.malicious}`,
       label: `${linkStats.malicious} maliziöse Link-Bewertungen`,
       severity: "critical", tier: 5, domain: "links", category: "link_reputation",
-      sourceType: "link_analysis", sourceRef: null, evidenceText: null,
+      sourceType: "link_analysis",
+      sourceRef: maliciousUrls.length > 0 ? `urls:${maliciousUrls.join(",")}` : `count:${linkStats.malicious}`,
+      evidenceText: null,
       promotable: true, downgradeEligible: false,
     }));
   }
+
   const structuralIssues = linkStats.criticalLinks.filter((cl) =>
     cl.reasons.some((r) => /Punycode|IP-Adresse/i.test(r))
   );
   if (structuralIssues.length > 0) {
+    const structuralUrls = structuralIssues
+      .map((cl) => cl.link?.hostname || cl.link?.normalized_url)
+      .filter(Boolean)
+      .slice(0, 3);
     signals.push(makeSignal({
       key: "links:structural",
       label: "Links mit Punycode oder IP-Literal",
       severity: "critical", tier: 5, domain: "links", category: "link_structure",
-      sourceType: "link_analysis", sourceRef: null, evidenceText: null,
+      sourceType: "link_analysis",
+      sourceRef: structuralUrls.length > 0 ? `urls:${structuralUrls.join(",")}` : `count:${structuralIssues.length}`,
+      evidenceText: null,
       promotable: true, downgradeEligible: false,
     }));
   }
+
   if (linkStats.suspicious > 0) {
     signals.push(makeSignal({
       key: `links:suspicious:${linkStats.suspicious}`,
       label: `${linkStats.suspicious} verdächtige Link-Bewertungen`,
       severity: "noteworthy", tier: 3, domain: "links", category: "link_reputation",
-      sourceType: "link_analysis", sourceRef: null, evidenceText: null,
+      sourceType: "link_analysis",
+      sourceRef: `count:${linkStats.suspicious}`,
+      evidenceText: null,
       promotable: true, downgradeEligible: false,
     }));
   }
+
   if (linkStats.total > 0 && linkStats.malicious === 0 && linkStats.criticalLinks.length === 0) {
     signals.push(makeSignal({
       key: "links:clean",
       label: "Alle Links reputationsmäßig unauffällig",
       severity: "positive", tier: 2, domain: "links", category: "link_reputation",
-      sourceType: "link_analysis", sourceRef: null, evidenceText: null,
+      sourceType: "link_analysis",
+      sourceRef: `total:${linkStats.total}`,
+      evidenceText: null,
       promotable: true, downgradeEligible: false,
     }));
   }
 
-  // 4. Bulk context
+  // 4. Bulk context (with detection source)
   if (isBulk) {
+    const bulkSource = detectBulkSource(result);
     signals.push(makeSignal({
       key: "bulk:detected",
       label: "Newsletter-/Mailing-Dienst erkannt",
       severity: "context", tier: 1, domain: "bulk", category: "bulk_context",
-      sourceType: "bulk_detection", sourceRef: null, evidenceText: null,
+      sourceType: "bulk_detection",
+      sourceRef: bulkSource,
+      evidenceText: null,
       promotable: true, downgradeEligible: false,
     }));
   }
 
   // 5. Display-Name spoofing from header findings
-  const headerFindings: any[] = result.header_findings || [];
   for (const f of headerFindings) {
     if (/display.?name.*(?:inkonsistenz|spoof)/i.test(f.title)) {
       if (!seenCanonical.has("identity:spoofing")) {
@@ -402,67 +438,29 @@ export function normalizeSignals(
   return signals;
 }
 
-// ─── Det finding severity (unchanged logic, moved here) ─────────────────────
+// ─── Bulk detection source ──────────────────────────────────────────────────
 
-function classifyDetSeverity(factor: string, isBulk: boolean, bulkDowngradeAllowed: boolean): EvidenceSeverity | null {
-  if (/^(spf_fail|dkim_fail|dmarc_fail|display_name_spoof|vt_malicious)$/.test(factor)) return "critical";
-  if (/^(display_mismatch|ip_literal|punycode|suspicious_tld)$/.test(factor)) return "critical";
-  if (/^(spf_missing|dkim_missing)$/.test(factor)) return "noteworthy";
-  if (/^(header_mismatch)$/.test(factor)) return (isBulk && bulkDowngradeAllowed) ? "noteworthy" : "critical";
-  if (/^(header_mismatch_minor)$/.test(factor)) return (isBulk && bulkDowngradeAllowed) ? "context" : "noteworthy";
-  if (/^(vt_suspicious)$/.test(factor)) return "noteworthy";
-  if (/^(bulk_headers|spam_header|tracking_heavy)$/.test(factor)) return "context";
-  if (/^(url_shortener|many_domains)$/.test(factor)) return isBulk ? "context" : "noteworthy";
-  return null;
-}
-
-// ─── Helper: construct NormalizedSignal ──────────────────────────────────────
-
-function makeSignal(input: Omit<NormalizedSignal, "canonicalKey" | "direction"> & { direction?: "positive" | "negative" }): NormalizedSignal {
-  return {
-    ...input,
-    canonicalKey: deriveCanonicalKey(input.key),
-    direction: input.direction ?? severityToDirection(input.severity),
-  };
-}
-
-// ─── Bootstrap PrioritizedSignals for bulk guard ────────────────────────────
-// Needed because bulk downgrade guard requires signals, but we're still building them.
-
-function bootstrapPrioritySignals(
-  identity: IdentityAssessment,
-  linkStats: LinkStats,
-  headerFindings: any[]
-): PrioritizedSignal[] {
-  const signals: PrioritizedSignal[] = [];
-  for (const auth of identity.authSignals) {
-    if (auth.status === "pass") signals.push({ key: `auth:${auth.protocol.toLowerCase()}:pass`, tier: 2 as any, domain: "auth", label: "", direction: "positive" });
-    else if (auth.status === "fail") signals.push({ key: `auth:${auth.protocol.toLowerCase()}:fail`, tier: 5 as any, domain: "auth", label: "", direction: "negative" });
+function detectBulkSource(result: any): string {
+  const headers = result.structured_headers || {};
+  if (headers["list-unsubscribe"] || headers["List-Unsubscribe"]) return "header:list-unsubscribe";
+  if (headers["precedence"] === "bulk" || headers["Precedence"] === "bulk") return "header:precedence:bulk";
+  const findings: any[] = result.header_findings || [];
+  for (const f of findings) {
+    if (/massen|marketing|bulk/i.test(f.title)) return `finding:${f.id || f.title}`;
+    if (/list.?unsubscribe/i.test(f.title) || /list.?unsubscribe/i.test(f.detail || "")) return `finding:${f.id || "list-unsubscribe"}`;
   }
-  if (linkStats.malicious > 0) signals.push({ key: "links:malicious", tier: 5 as any, domain: "links", label: "", direction: "negative" });
-  for (const f of headerFindings) {
-    if (/display.?name.*(?:inkonsistenz|spoof)/i.test(f.title)) {
-      signals.push({ key: "identity:spoofing", tier: 5 as any, domain: "identity", label: "", direction: "negative" });
-      break;
-    }
-  }
-  return signals;
+  if (result.assessment?.classification === "advertising") return "classification:advertising";
+  return "heuristic";
 }
 
-// ─── Projection Functions ───────────────────────────────────────────────────
-// Project NormalizedSignal[] into the view types used by UI components.
+// ─── Projection: PrioritizedSignal[] ────────────────────────────────────────
 
-/**
- * Projects NormalizedSignals into PrioritizedSignals for conflict resolution.
- * Only includes promotable signals (those with known semantic keys).
- */
 export function toPrioritizedSignals(signals: NormalizedSignal[]): PrioritizedSignal[] {
   const seen = new Set<string>();
   const result: PrioritizedSignal[] = [];
 
   for (const s of signals) {
     if (!s.promotable) continue;
-    // Deduplicate by key (multiple raw sources may map to same signal)
     if (seen.has(s.key)) continue;
     seen.add(s.key);
 
@@ -478,18 +476,14 @@ export function toPrioritizedSignals(signals: NormalizedSignal[]): PrioritizedSi
   return result;
 }
 
-/**
- * Projects NormalizedSignals into EvidenceGroups for UI display.
- * Includes ALL signals (promotable or not) for complete evidence listing.
- */
+// ─── Projection: EvidenceGroups ─────────────────────────────────────────────
+
 export function toEvidenceGroups(signals: NormalizedSignal[]): EvidenceGroups {
   const groups: EvidenceGroups = { critical: [], noteworthy: [], positive: [], context: [] };
 
   for (const s of signals) {
-    // Skip signals without evidence text (derived signals like identity:consistent)
     if (!s.evidenceText) continue;
 
-    // Map sourceType to the legacy source field for component compatibility
     const item: EvidenceItem = {
       key: s.key,
       text: s.evidenceText,

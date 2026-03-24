@@ -1,5 +1,8 @@
 /**
  * Analysis module — public API.
+ *
+ * Primary pipeline: normalizeSignals() → toPrioritizedSignals() / toEvidenceGroups()
+ * Legacy: collectSignals() and classifyEvidence() are deprecated.
  */
 
 // Core types
@@ -24,13 +27,13 @@ export type {
 // Identity & Auth
 export { assessIdentity, detectBulkMail } from "./identity";
 
-// Central normalization
+// Central normalization (primary API)
 export { normalizeSignals, toPrioritizedSignals, toEvidenceGroups, deriveCanonicalKey } from "./normalize";
 
-// Priority & Conflict (operates on PrioritizedSignal[])
-export { collectSignals, assessConflict } from "./priority";
+// Conflict assessment
+export { assessConflict } from "./priority";
 
-// Evidence classification (legacy adapter)
+// Evidence classification (legacy — use toEvidenceGroups instead)
 export { classifyEvidence } from "./evidence";
 
 // Link analysis

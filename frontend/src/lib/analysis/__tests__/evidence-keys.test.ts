@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { classifyEvidence } from "../evidence";
-import { collectSignals } from "../priority";
+import { normalizeSignals, toPrioritizedSignals } from "../normalize";
 import { assessIdentity } from "../identity";
 import { summarizeLinks } from "../links";
 import { extractDecisionFactors } from "../decision";
-import type { EvidenceItem } from "../types";
+import type { EvidenceItem, PrioritizedSignal } from "../types";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -25,6 +25,13 @@ function allItems(groups: ReturnType<typeof classifyEvidence>): EvidenceItem[] {
   return [...groups.critical, ...groups.noteworthy, ...groups.positive, ...groups.context];
 }
 
+function getSignals(result: any): PrioritizedSignal[] {
+  const identity = assessIdentity(result);
+  const linkStats = summarizeLinks(result.links || []);
+  const normalized = normalizeSignals(result, identity, linkStats, identity.isBulkSender);
+  return toPrioritizedSignals(normalized);
+}
+
 // ─── Key Stability ──────────────────────────────────────────────────────────
 
 describe("Evidence key assignment", () => {
@@ -36,7 +43,7 @@ describe("Evidence key assignment", () => {
     });
     const identity = assessIdentity(result);
     const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, result.header_findings, []);
+    const signals = getSignals(result);
     const groups = classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals);
     const items = allItems(groups);
     const spfItem = items.find((i) => i.key === "auth:spf:pass");
@@ -52,8 +59,7 @@ describe("Evidence key assignment", () => {
       ],
     });
     const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, result.header_findings, []);
+    const signals = getSignals(result);
     const groups = classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals);
     const items = allItems(groups);
     const dkimItem = items.find((i) => i.key === "auth:dkim:fail");
@@ -68,8 +74,7 @@ describe("Evidence key assignment", () => {
       ],
     });
     const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, [], result.deterministic_findings);
+    const signals = getSignals(result);
     const groups = classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals);
     const items = allItems(groups);
     const vtItem = items.find((i) => i.key === "links:malicious");
@@ -83,8 +88,7 @@ describe("Evidence key assignment", () => {
       ],
     });
     const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, result.header_findings, []);
+    const signals = getSignals(result);
     const groups = classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals);
     const items = allItems(groups);
     const item = items.find((i) => i.key === "header:HDR-099");
@@ -100,8 +104,7 @@ describe("Evidence key assignment", () => {
       },
     });
     const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, [], []);
+    const signals = getSignals(result);
     const groups = classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals);
     const items = allItems(groups);
     const item = items.find((i) => i.key === "evidence:0");
@@ -120,22 +123,17 @@ describe("Promotion and dedup via keys", () => {
       ],
     });
     const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, result.header_findings, []);
+    const signals = getSignals(result);
     const factors = extractDecisionFactors(signals);
     const groups = classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals);
 
-    // SPF pass should be promoted
-    const spfSignal = signals.find((s) => s.key === "auth:spf:pass");
+    const spfSignal = signals.find((s: PrioritizedSignal) => s.key === "auth:spf:pass");
     expect(spfSignal).toBeDefined();
     expect(factors.promotedKeys.has("auth:spf:pass")).toBe(true);
 
-    // Evidence item with same key exists
     const items = allItems(groups);
     const spfEvidence = items.find((i) => i.key === "auth:spf:pass");
     expect(spfEvidence).toBeDefined();
-
-    // The key is in promotedKeys — exact match, no fuzzy
     expect(factors.promotedKeys.has(spfEvidence!.key)).toBe(true);
   });
 
@@ -146,18 +144,14 @@ describe("Promotion and dedup via keys", () => {
       ],
     });
     const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, result.header_findings, []);
+    const signals = getSignals(result);
     const factors = extractDecisionFactors(signals);
     const groups = classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals);
     const items = allItems(groups);
 
-    // This finding has no signal key mapping (it's about analysis, not pass/fail)
     const item = items.find((i) => i.text.includes("SPF-Header-Analyse"));
     expect(item).toBeDefined();
-    // Its key should be the header ID fallback, not "auth:spf:pass"
     expect(item!.key).toBe("header:HDR-010");
-    // It should NOT be in promotedKeys
     expect(factors.promotedKeys.has(item!.key)).toBe(false);
   });
 
@@ -168,12 +162,10 @@ describe("Promotion and dedup via keys", () => {
       ],
     });
     const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, result.header_findings, []);
+    const signals = getSignals(result);
     const factors = extractDecisionFactors(signals);
     const groups = classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals);
 
-    // This finding maps to no signal key → goes to context group
     const item = allItems(groups).find((i) => i.text.includes("Received-Kette"));
     expect(item).toBeDefined();
     expect(item!.severity).toBe("context");
@@ -183,18 +175,16 @@ describe("Promotion and dedup via keys", () => {
 
 // ─── Signal Key Stability ───────────────────────────────────────────────────
 
-describe("PrioritizedSignal keys", () => {
+describe("PrioritizedSignal keys (via normalized pipeline)", () => {
   it("auth signals have deterministic keys", () => {
     const result = makeResult({
       authentication_results: "spf=pass; dkim=fail; dmarc=none",
     });
-    const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, [], []);
+    const signals = getSignals(result);
 
-    expect(signals.find((s) => s.key === "auth:spf:pass")).toBeDefined();
-    expect(signals.find((s) => s.key === "auth:dkim:fail")).toBeDefined();
-    expect(signals.find((s) => s.key === "auth:dmarc:none")).toBeDefined();
+    expect(signals.find((s: PrioritizedSignal) => s.key === "auth:spf:pass")).toBeDefined();
+    expect(signals.find((s: PrioritizedSignal) => s.key === "auth:dkim:fail")).toBeDefined();
+    expect(signals.find((s: PrioritizedSignal) => s.key === "auth:dmarc:none")).toBeDefined();
   });
 
   it("identity consistency signal has deterministic key", () => {
@@ -206,11 +196,9 @@ describe("PrioritizedSignal keys", () => {
         to: null, date: null, message_id: null,
       },
     });
-    const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, [], []);
+    const signals = getSignals(result);
 
-    expect(signals.find((s) => s.key === "identity:mismatch")).toBeDefined();
+    expect(signals.find((s: PrioritizedSignal) => s.key === "identity:mismatch")).toBeDefined();
   });
 
   it("link signals have deterministic keys", () => {
@@ -224,22 +212,18 @@ describe("PrioritizedSignal keys", () => {
         },
       ],
     });
-    const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, [], []);
+    const signals = getSignals(result);
 
-    expect(signals.find((s) => s.key === "links:structural")).toBeDefined();
+    expect(signals.find((s: PrioritizedSignal) => s.key === "links:structural")).toBeDefined();
   });
 
   it("bulk detection signal has deterministic key", () => {
     const result = makeResult({
       structured_headers: { "list-unsubscribe": "<mailto:unsub@example.com>" },
     });
-    const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, [], []);
+    const signals = getSignals(result);
 
-    expect(signals.find((s) => s.key === "bulk:detected")).toBeDefined();
+    expect(signals.find((s: PrioritizedSignal) => s.key === "bulk:detected")).toBeDefined();
   });
 });
 
@@ -247,7 +231,6 @@ describe("PrioritizedSignal keys", () => {
 
 describe("Promoted item visibility rules", () => {
   it("critical promoted items appear as dimmed (not hidden)", () => {
-    // A finding that is both critical AND has a signal key that gets promoted
     const result = makeResult({
       authentication_results: "spf=fail; dkim=pass; dmarc=pass",
       header_findings: [
@@ -255,20 +238,13 @@ describe("Promoted item visibility rules", () => {
       ],
     });
     const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, result.header_findings, []);
+    const signals = getSignals(result);
     const factors = extractDecisionFactors(signals);
     const groups = classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals);
 
-    // SPF fail should be in critical group
     const criticalItem = groups.critical.find((i) => i.key === "auth:spf:fail");
     expect(criticalItem).toBeDefined();
-
-    // And it should be promoted
     expect(factors.promotedKeys.has("auth:spf:fail")).toBe(true);
-
-    // Rule: critical promoted items stay visible (dimmed) — not hidden
-    // This is enforced by the component, but we verify the data is correct
   });
 
   it("non-critical promoted items are excluded by key match", () => {
@@ -278,15 +254,12 @@ describe("Promoted item visibility rules", () => {
       ],
     });
     const identity = assessIdentity(result);
-    const linkStats = summarizeLinks(result.links);
-    const signals = collectSignals(identity, linkStats, result.header_findings, []);
+    const signals = getSignals(result);
     const factors = extractDecisionFactors(signals);
     const groups = classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals);
 
     const positiveItem = groups.positive.find((i) => i.key === "auth:spf:pass");
     expect(positiveItem).toBeDefined();
     expect(factors.promotedKeys.has("auth:spf:pass")).toBe(true);
-
-    // Component will hide this entirely in non-critical group
   });
 });

@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import axios from "axios";
 import StatusView from "@/components/StatusView";
 import ResultView from "@/components/ResultView";
+import type { AnalysisSummary } from "@/lib/analysis";
 
 const API = "";
 
@@ -60,10 +61,18 @@ export default function JobPage() {
     return () => { active = false; };
   }, [pollStatus, fetchResult]);
 
-  const downloadExport = async () => {
+  const downloadExport = async (analysisSummary: AnalysisSummary) => {
     try {
-      const { data } = await axios.get(`${API}/api/jobs/${jobId}/export`);
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      // Fetch raw backend data
+      const { data: rawExport } = await axios.get(`${API}/api/jobs/${jobId}/export`);
+
+      // Enrich with normalized analysis
+      const enrichedExport = {
+        ...rawExport,
+        analysis_summary: analysisSummary,
+      };
+
+      const blob = new Blob([JSON.stringify(enrichedExport, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;

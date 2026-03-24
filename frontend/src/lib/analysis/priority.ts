@@ -1,8 +1,8 @@
 /**
- * Priority model and conflict assessment.
+ * Conflict assessment and bulk downgrade guard.
  *
- * Assigns stable keys to every signal for explicit referencing.
- * Key format: "domain:type[:qualifier]"
+ * Operates on PrioritizedSignal[] (projected from NormalizedSignal[]).
+ * Signal collection is done exclusively by normalizeSignals() in normalize.ts.
  */
 
 import type {
@@ -11,146 +11,7 @@ import type {
   LinkStats,
   PrioritizedSignal,
   ConflictAssessment,
-  PRIORITY_TIER,
 } from "./types";
-
-// ─── Signal Collection ──────────────────────────────────────────────────────
-
-export function collectSignals(
-  identity: IdentityAssessment,
-  linkStats: LinkStats,
-  headerFindings: any[],
-  detFindings: any[]
-): PrioritizedSignal[] {
-  const signals: PrioritizedSignal[] = [];
-
-  // Auth signals — key: "auth:{protocol}:{status}"
-  for (const auth of identity.authSignals) {
-    if (auth.status === "pass") {
-      signals.push({
-        key: `auth:${auth.protocol.toLowerCase()}:pass`,
-        tier: 2 as typeof PRIORITY_TIER.POSITIVE,
-        domain: "auth",
-        label: `${auth.protocol} bestanden`,
-        direction: "positive",
-      });
-    } else if (auth.status === "fail") {
-      signals.push({
-        key: `auth:${auth.protocol.toLowerCase()}:fail`,
-        tier: 5 as typeof PRIORITY_TIER.CRITICAL_HARD,
-        domain: "auth",
-        label: `${auth.protocol} fehlgeschlagen`,
-        direction: "negative",
-      });
-    } else if (auth.status === "none" || auth.status === "softfail") {
-      signals.push({
-        key: `auth:${auth.protocol.toLowerCase()}:${auth.status}`,
-        tier: 3 as typeof PRIORITY_TIER.NOTEWORTHY,
-        domain: "auth",
-        label: `${auth.protocol} nicht vorhanden/softfail`,
-        direction: "negative",
-      });
-    }
-  }
-
-  // Identity consistency — key: "identity:{status}"
-  if (identity.consistency === "consistent") {
-    signals.push({
-      key: "identity:consistent",
-      tier: 2 as typeof PRIORITY_TIER.POSITIVE,
-      domain: "identity",
-      label: "Konsistente Absenderidentität",
-      direction: "positive",
-    });
-  } else if (identity.consistency === "suspicious") {
-    signals.push({
-      key: "identity:suspicious",
-      tier: 5 as typeof PRIORITY_TIER.CRITICAL_HARD,
-      domain: "identity",
-      label: "Verdächtige Identitätsabweichung",
-      direction: "negative",
-    });
-  } else if (identity.consistency === "partial_mismatch") {
-    signals.push({
-      key: "identity:mismatch",
-      tier: 4 as typeof PRIORITY_TIER.CRITICAL_SOFT,
-      domain: "identity",
-      label: "Domain-Abweichung (From/Reply-To/Return-Path)",
-      direction: "negative",
-    });
-  }
-
-  // Link signals — key: "links:{type}[:{count}]"
-  if (linkStats.malicious > 0) {
-    signals.push({
-      key: `links:malicious:${linkStats.malicious}`,
-      tier: 5 as typeof PRIORITY_TIER.CRITICAL_HARD,
-      domain: "links",
-      label: `${linkStats.malicious} maliziöse Link-Bewertungen`,
-      direction: "negative",
-    });
-  }
-
-  const structuralLinkIssues = linkStats.criticalLinks.filter((cl) =>
-    cl.reasons.some((r) => /Punycode|IP-Adresse/i.test(r))
-  );
-  if (structuralLinkIssues.length > 0) {
-    signals.push({
-      key: "links:structural",
-      tier: 5 as typeof PRIORITY_TIER.CRITICAL_HARD,
-      domain: "links",
-      label: "Links mit Punycode oder IP-Literal",
-      direction: "negative",
-    });
-  }
-
-  if (linkStats.suspicious > 0) {
-    signals.push({
-      key: `links:suspicious:${linkStats.suspicious}`,
-      tier: 3 as typeof PRIORITY_TIER.NOTEWORTHY,
-      domain: "links",
-      label: `${linkStats.suspicious} verdächtige Link-Bewertungen`,
-      direction: "negative",
-    });
-  }
-
-  if (linkStats.total > 0 && linkStats.malicious === 0 && linkStats.criticalLinks.length === 0) {
-    signals.push({
-      key: "links:clean",
-      tier: 2 as typeof PRIORITY_TIER.POSITIVE,
-      domain: "links",
-      label: "Alle Links reputationsmäßig unauffällig",
-      direction: "positive",
-    });
-  }
-
-  // Bulk context — key: "bulk:detected"
-  if (identity.isBulkSender) {
-    signals.push({
-      key: "bulk:detected",
-      tier: 1 as typeof PRIORITY_TIER.CONTEXT,
-      domain: "bulk",
-      label: "Newsletter-/Mailing-Dienst erkannt",
-      direction: "positive",
-    });
-  }
-
-  // Display-Name spoofing — key: "identity:spoofing"
-  for (const f of headerFindings) {
-    if (/display.?name.*(?:inkonsistenz|spoof)/i.test(f.title)) {
-      signals.push({
-        key: "identity:spoofing",
-        tier: 5 as typeof PRIORITY_TIER.CRITICAL_HARD,
-        domain: "identity",
-        label: "Display-Name-Spoofing erkannt",
-        direction: "negative",
-      });
-      break; // only add once
-    }
-  }
-
-  return signals;
-}
 
 // ─── Bulk Downgrade Guard ───────────────────────────────────────────────────
 
@@ -159,10 +20,33 @@ export type BulkDowngradeDecision = {
   reason: string | null;
 };
 
+/**
+ * Evaluates whether bulk/newsletter context allows downgrading soft-critical signals.
+ *
+ * Can work on PrioritizedSignal[] or on pre-computed flags for bootstrap.
+ */
 export function evaluateBulkDowngrade(signals: PrioritizedSignal[], authSignals: AuthSignal[]): BulkDowngradeDecision {
   const hardCriticals = signals.filter((s) => s.tier === 5 && s.direction === "negative");
   if (hardCriticals.length > 0) {
     return { allowed: false, reason: `Herabstufung blockiert: ${hardCriticals[0].label}` };
+  }
+  const authPassed = authSignals.filter((a) => a.status === "pass").length;
+  if (authPassed < 2) {
+    return { allowed: false, reason: "Herabstufung blockiert: Unzureichende Authentifizierung (weniger als 2 Protokolle bestanden)" };
+  }
+  return { allowed: true, reason: null };
+}
+
+/**
+ * Lightweight bulk downgrade check using raw inputs.
+ * Used by normalizeSignals() to avoid circular dependency.
+ */
+export function evaluateBulkDowngradeFromRaw(
+  authSignals: AuthSignal[],
+  hasHardCritical: boolean
+): BulkDowngradeDecision {
+  if (hasHardCritical) {
+    return { allowed: false, reason: "Herabstufung blockiert: Kritisches Signal vorhanden" };
   }
   const authPassed = authSignals.filter((a) => a.status === "pass").length;
   if (authPassed < 2) {

@@ -11,18 +11,21 @@ import ScoreDetails from "./ScoreDetails";
 import Accordion from "./Accordion";
 import {
   assessIdentity,
-  collectSignals,
+  normalizeSignals,
+  toPrioritizedSignals,
+  toEvidenceGroups,
   assessConflict,
-  classifyEvidence,
   summarizeLinks,
   extractScoreDrivers,
   extractDecisionFactors,
   generateDecisionExplanation,
+  buildAnalysisSummary,
 } from "../lib/analysis";
+import type { AnalysisSummary } from "../lib/analysis";
 
 type Props = {
   result: any;
-  onDownload: () => void;
+  onDownload: (summary: AnalysisSummary) => void;
 };
 
 export default function ResultView({ result, onDownload }: Props) {
@@ -32,29 +35,31 @@ export default function ResultView({ result, onDownload }: Props) {
   const identity = useMemo(() => assessIdentity(result), [result]);
   const linkStats = useMemo(() => summarizeLinks(result.links || []), [result.links]);
 
-  // 2. Priority signals → conflict
-  const signals = useMemo(
-    () => collectSignals(identity, linkStats, result.header_findings || [], result.deterministic_findings || []),
-    [identity, linkStats, result.header_findings, result.deterministic_findings]
+  // 2. Normalize → single source of truth
+  const normalized = useMemo(
+    () => normalizeSignals(result, identity, linkStats, identity.isBulkSender),
+    [result, identity, linkStats]
   );
+
+  // 3. Project views from normalized signals
+  const signals = useMemo(() => toPrioritizedSignals(normalized), [normalized]);
   const conflict = useMemo(() => assessConflict(signals, identity), [signals, identity]);
-
-  // 3. Decision factors (top signals for the compact block)
   const decisionFactors = useMemo(() => extractDecisionFactors(signals), [signals]);
+  const evidenceGroups = useMemo(() => toEvidenceGroups(normalized), [normalized]);
 
-  // 4. Evidence classification
-  const evidenceGroups = useMemo(
-    () => classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals),
-    [result, identity.isBulkSender, signals, identity.authSignals]
-  );
-
-  // 5. Score drivers
+  // 4. Score drivers (from raw det findings, independent of normalization)
   const scoreDrivers = useMemo(() => extractScoreDrivers(result), [result]);
 
-  // 6. Decision explanation
+  // 5. Decision explanation
   const generatedExplanation = useMemo(
     () => generateDecisionExplanation(result, identity, linkStats, conflict),
     [result, identity, linkStats, conflict]
+  );
+
+  // 6. Serializable summary (for export)
+  const analysisSummary = useMemo(
+    () => buildAnalysisSummary(normalized, decisionFactors, conflict),
+    [normalized, decisionFactors, conflict]
   );
 
   return (
@@ -170,7 +175,7 @@ export default function ResultView({ result, onDownload }: Props) {
       {/* Export */}
       <div className="flex justify-center pt-2 pb-4">
         <button
-          onClick={onDownload}
+          onClick={() => onDownload(analysisSummary)}
           className="inline-flex items-center gap-2 px-6 py-2.5 bg-white border border-gray-200 rounded-xl text-sm font-medium text-text-primary hover:bg-gray-50 hover:border-gray-300 active:scale-[0.98] transition-all shadow-sm"
         >
           <svg className="w-4 h-4 text-text-secondary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>

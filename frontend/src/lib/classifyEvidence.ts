@@ -21,7 +21,6 @@ export {
   assessIdentity,
   summarizeLinks,
   extractScoreDrivers,
-  collectSignals,
   assessConflict,
   classifyEvidence,
   generateDecisionExplanation,
