@@ -90,8 +90,14 @@ export default function EvidenceGroups({ groups, promotedKeys }: Props) {
   const total = groups.critical.length + groups.noteworthy.length + groups.positive.length + groups.context.length;
   if (total === 0) return null;
 
-  const hasCritical = groups.critical.length > 0;
-  const restCount = groups.noteworthy.length + groups.positive.length + groups.context.length;
+  // Only show "Kritische Risiken" if there are REAL critical items (not just false positives)
+  // Filter out items that are positive statements misclassified as critical
+  const realCritical = groups.critical.filter(
+    (i) => !(/keine.*(bösartig|malizi|suspicious|verdächtig)/i.test(i.text) || /no.*(malicious|suspicious|threat)/i.test(i.text))
+  );
+  const hasCritical = realCritical.length > 0;
+  const restCount = groups.noteworthy.length + groups.positive.length + groups.context.length
+    + (groups.critical.length - realCritical.length); // misclassified items go to rest
 
   return (
     <div className="space-y-2">
@@ -101,7 +107,7 @@ export default function EvidenceGroups({ groups, promotedKeys }: Props) {
       </div>
 
       {hasCritical && (
-        <GroupSection title="Kritische Risiken" items={groups.critical} variant="critical" promotedKeys={keys} />
+        <GroupSection title="Kritische Risiken" items={realCritical} variant="critical" promotedKeys={keys} />
       )}
 
       {restCount > 0 && (

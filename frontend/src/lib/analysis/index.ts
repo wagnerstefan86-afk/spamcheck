@@ -40,3 +40,7 @@ export { assessConflict } from "./priority";
 
 // Link analysis
 export { summarizeLinks } from "./links";
+
+// Content risk detection
+export { detectContentRisks, assessContentRiskLevel } from "./content";
+export type { ContentRiskMatch, ContentRiskType } from "./content";

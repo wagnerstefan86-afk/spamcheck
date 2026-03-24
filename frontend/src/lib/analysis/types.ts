@@ -21,7 +21,9 @@ export type SignalCategory =
   | "link_reputation"
   | "link_structure"
   | "bulk_context"
-  | "content_analysis";
+  | "content_analysis"
+  | "content_risk"
+  | "reputation_coverage";
 
 // ─── Source Tracing ─────────────────────────────────────────────────────────
 
@@ -33,7 +35,9 @@ export type SignalSourceType =
   | "link_analysis"     // derived from link scan results
   | "identity_derived"  // derived from sender domain comparison
   | "llm_evidence"      // from assessment.evidence[] (LLM output)
-  | "bulk_detection";   // derived from structured_headers / header_findings
+  | "bulk_detection"    // derived from structured_headers / header_findings
+  | "content_analysis"  // derived from subject/body pattern matching
+  | "reputation_scan";  // derived from link scan completion status
 
 // ─── Priority Tiers ────────────────────────────────────────────────────────
 
@@ -208,6 +212,10 @@ export type AnalysisResult = {
   scoreDrivers: ScoreDriver[];
   /** Decision explanation derived from normalized signals and conflict */
   explanation: string | null;
+  /** Content risk level: "none" | "low" | "high" */
+  contentRiskLevel: "none" | "low" | "high";
+  /** Whether a decision override was applied (phishing content overrides "allow") */
+  overrideApplied: boolean;
   /** Serializable summary — ready for export/API */
   summary: AnalysisSummary;
 };
@@ -281,4 +289,10 @@ export type AnalysisSummary = {
     explanation: string | null;
     bulkDowngradeApplied: boolean;
   };
+
+  /** Content risk level derived from subject/body/evidence patterns */
+  contentRiskLevel: "none" | "low" | "high";
+
+  /** Whether a decision override was applied due to content risk */
+  overrideApplied: boolean;
 };

@@ -17,6 +17,7 @@ import { assessIdentity } from "./identity";
 import { summarizeLinks } from "./links";
 import { normalizeSignals, toPrioritizedSignals, toEvidenceGroups } from "./normalize";
 import { assessConflict } from "./priority";
+import { detectContentRisks, assessContentRiskLevel } from "./content";
 
 // ─── Score Drivers ──────────────────────────────────────────────────────────
 
@@ -85,32 +86,50 @@ export function extractDecisionFactors(signals: PrioritizedSignal[]): DecisionFa
 export function generateDecisionExplanation(
   signals: PrioritizedSignal[],
   conflict: ConflictAssessment,
-  hasAnalystSummary: boolean
+  hasAnalystSummary: boolean,
+  contentRiskLevel: "none" | "low" | "high" = "none",
+  allNormalized: NormalizedSignal[] = []
 ): string | null {
-  if (hasAnalystSummary && !conflict.hasConflict) return null;
+  if (hasAnalystSummary && !conflict.hasConflict && contentRiskLevel === "none") return null;
 
   const parts: string[] = [];
 
-  // Auth summary from signals
-  const authPass = signals.filter((s) => s.domain === "auth" && s.direction === "positive");
+  // Content risk — most important, comes first
+  const contentSignals = signals.filter((s) => s.domain === "content" && s.direction === "negative");
+  if (contentSignals.length > 0) {
+    const labels = contentSignals.map((s) => s.label).slice(0, 2);
+    parts.push(`Inhaltliche Risikomerkmale: ${labels.join(", ")}.`);
+  }
+
+  // Auth summary — use allNormalized to find auth signals (may be demoted from PrioritizedSignals)
+  const authSource = allNormalized.length > 0 ? allNormalized : signals;
+  const allAuthPositive = authSource.filter((s) => s.domain === "auth" && s.direction === "positive");
   const authFail = signals.filter((s) => s.domain === "auth" && s.direction === "negative" && s.tier >= 5);
-  if (authPass.length > 0 && authFail.length === 0) {
-    const protocols = authPass.map((s) => s.label.split(" ")[0]).join(", ");
-    parts.push(`Authentifizierung (${protocols}) ist valide.`);
-  } else if (authFail.length > 0) {
+  if (authFail.length > 0) {
     const protocols = authFail.map((s) => s.label.split(" ")[0]).join(", ");
     parts.push(`Authentifizierung teilweise fehlgeschlagen (${protocols}).`);
+  } else if (allAuthPositive.length > 0 && contentRiskLevel === "high") {
+    parts.push("Authentifizierung ist technisch valide, belegt aber nicht die Gutartigkeit des Inhalts.");
+  } else if (allAuthPositive.length > 0) {
+    const protocols = allAuthPositive.map((s) => s.label.split(" ")[0]).join(", ");
+    parts.push(`Authentifizierung (${protocols}) ist valide.`);
+  }
+
+  // Reputation unknown
+  const reputationUnknown = signals.find((s) => s.key === "reputation:unknown");
+  if (reputationUnknown) {
+    parts.push("Reputations-Scans konnten nicht vollständig durchgeführt werden — Ergebnis nicht belastbar.");
   }
 
   // Link summary from signals
   const maliciousLink = signals.find((s) => s.key.startsWith("links:malicious"));
   const structuralLink = signals.find((s) => s.key === "links:structural");
-  const cleanLink = signals.find((s) => s.key === "links:clean");
+  const cleanLink = signals.find((s) => s.key === "links:clean" && s.tier >= 2); // only if not demoted
   if (maliciousLink) {
     parts.push(`${maliciousLink.label}.`);
   } else if (structuralLink) {
     parts.push(`${structuralLink.label}.`);
-  } else if (cleanLink) {
+  } else if (cleanLink && !reputationUnknown) {
     parts.push(`${cleanLink.label}.`);
   }
 
@@ -137,13 +156,17 @@ export function buildAnalysisSummary(
   conflict: ConflictAssessment,
   explanation: string | null,
   classification: string | null,
-  analystSummary: string | null
+  analystSummary: string | null,
+  contentRiskLevel: "none" | "low" | "high" = "none",
+  overrideApplied: boolean = false
 ): AnalysisSummary {
   return {
     version: 1,
     classification,
     analystSummary,
     explanation,
+    contentRiskLevel,
+    overrideApplied,
     signals: normalizedSignals.map((s) => ({
       key: s.key,
       canonicalKey: s.canonicalKey,
@@ -187,31 +210,43 @@ export function analyzeResult(result: any): AnalysisResult {
   const identity = assessIdentity(result);
   const linkStats = summarizeLinks(result.links || []);
 
-  // 2. Normalize — single source of truth
+  // 2. Content risk detection (pre-normalization — affects auth weighting)
+  const contentRisks = detectContentRisks(result);
+  const contentRiskLevel = assessContentRiskLevel(contentRisks);
+
+  // 3. Normalize — single source of truth
+  // normalizeSignals internally uses content risk for auth reweighting
   const normalized = normalizeSignals(result, identity, linkStats, identity.isBulkSender);
 
-  // 3. Project views
+  // 4. Project views
   const signals = toPrioritizedSignals(normalized);
   const conflict = assessConflict(signals, identity);
   const decisionFactors = extractDecisionFactors(signals);
   const evidenceGroups = toEvidenceGroups(normalized);
   const scoreDrivers = extractScoreDrivers(result);
 
-  // 4. Decision explanation — derived from signals and conflict
+  // 5. Decision override: phishing content must not result in "allow"
+  const overrideApplied = evaluateDecisionOverride(contentRiskLevel, signals, linkStats);
+
+  // 6. Decision explanation — derived from signals and conflict
   const explanation = generateDecisionExplanation(
     signals,
     conflict,
-    !!a?.analyst_summary
+    !!a?.analyst_summary,
+    contentRiskLevel,
+    normalized
   );
 
-  // 5. Serializable summary
+  // 7. Serializable summary
   const summary = buildAnalysisSummary(
     normalized,
     decisionFactors,
     conflict,
     explanation,
     a?.classification || null,
-    a?.analyst_summary || null
+    a?.analyst_summary || null,
+    contentRiskLevel,
+    overrideApplied
   );
 
   return {
@@ -224,6 +259,29 @@ export function analyzeResult(result: any): AnalysisResult {
     evidenceGroups,
     scoreDrivers,
     explanation,
+    contentRiskLevel,
+    overrideApplied,
     summary,
   };
+}
+
+// ─── Decision Override ──────────────────────────────────────────────────────
+
+/**
+ * Evaluates whether content risk should override a "legitimate/allow" decision.
+ *
+ * Rules (conservative — few, clear):
+ * 1. High content risk → always override (must not be "allow")
+ * 2. High content risk + unknown reputation → strong override
+ * 3. Low content risk alone → no override
+ */
+function evaluateDecisionOverride(
+  contentRiskLevel: "none" | "low" | "high",
+  signals: PrioritizedSignal[],
+  linkStats: LinkStats
+): boolean {
+  if (contentRiskLevel !== "high") return false;
+
+  // High content risk always triggers override
+  return true;
 }

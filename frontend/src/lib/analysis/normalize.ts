@@ -23,6 +23,8 @@ import type {
   PRIORITY_TIER,
 } from "./types";
 import { evaluateBulkDowngradeFromRaw } from "./priority";
+import { detectContentRisks, assessContentRiskLevel } from "./content";
+import type { ContentRiskMatch } from "./content";
 
 // ─── Canonical Key ──────────────────────────────────────────────────────────
 
@@ -112,13 +114,16 @@ function classifyHeaderSeverity(combined: string, backendSeverity: string, isBul
   return "positive";
 }
 
-const EV_CRITICAL = [/phishing/i, /malicious|maliziös|bösartig/i, /spoofing|spoof/i, /spf.*(fail|none|softfail)/i, /dkim.*(fail|none)/i, /dmarc.*(fail|none|reject)/i, /verdächtig.*domain|suspicious.*domain/i, /identitätsabweichung|identity.*mismatch/i, /impersonat/i];
-const EV_POSITIVE = [/spf.*(pass|erfolgreich|valide|bestanden)/i, /dkim.*(pass|erfolgreich|valide|bestanden)/i, /dmarc.*(pass|erfolgreich|valide|bestanden)/i, /keine.*(bösartig|malizi|suspicious|verdächtig|bedroh)/i, /no.*(malicious|suspicious|threat)/i, /reputation.*(gut|unauffällig|clean|good)/i, /authentif.*(erfolgreich|valide|bestanden)/i, /legitimate|legitim/i, /vertrauenswürdig|trusted/i];
+// IMPORTANT: "keine bösartigen" must match POSITIVE before CRITICAL.
+// EV_POSITIVE is checked first now to prevent "bösartig" in "keine bösartigen" from matching CRITICAL.
+const EV_POSITIVE = [/keine.*(bösartig|malizi|suspicious|verdächtig|bedroh)/i, /no.*(malicious|suspicious|threat)/i, /spf.*(pass|erfolgreich|valide|bestanden)/i, /dkim.*(pass|erfolgreich|valide|bestanden)/i, /dmarc.*(pass|erfolgreich|valide|bestanden)/i, /reputation.*(gut|unauffällig|clean|good)/i, /authentif.*(erfolgreich|valide|bestanden)/i, /legitimate|legitim/i, /vertrauenswürdig|trusted/i];
+const EV_CRITICAL = [/phishing/i, /(?<!keine?.{0,20})(malicious|maliziös|bösartig)/i, /spoofing|spoof/i, /spf.*(fail|none|softfail)/i, /dkim.*(fail|none)/i, /dmarc.*(fail|none|reject)/i, /verdächtig.*domain|suspicious.*domain/i, /identitätsabweichung|identity.*mismatch/i, /impersonat/i];
 const EV_CONTEXT = [/newsletter|marketing|bulk|mailing/i, /list.?unsubscribe|abmelde/i, /tracking|click.?tracking/i];
 
 function classifyEvidenceTextSeverity(text: string): EvidenceSeverity {
-  for (const p of EV_CRITICAL) { if (p.test(text)) return "critical"; }
+  // Check POSITIVE first — "keine bösartigen" must not match CRITICAL "bösartig"
   for (const p of EV_POSITIVE) { if (p.test(text)) return "positive"; }
+  for (const p of EV_CRITICAL) { if (p.test(text)) return "critical"; }
   for (const p of EV_CONTEXT) { if (p.test(text)) return "context"; }
   return "noteworthy";
 }
@@ -149,6 +154,8 @@ function keyToCategory(key: string): SignalCategory {
   if (key.startsWith("links:malicious") || key.startsWith("links:suspicious") || key.startsWith("links:clean")) return "link_reputation";
   if (key.startsWith("links:structural")) return "link_structure";
   if (key.startsWith("bulk:")) return "bulk_context";
+  if (key.startsWith("content:")) return "content_risk";
+  if (key.startsWith("reputation:")) return "reputation_coverage";
   return "content_analysis";
 }
 
@@ -433,6 +440,87 @@ export function normalizeSignals(
       promotable: !!signalKey,
       downgradeEligible: false,
     }));
+  }
+
+  // 9. Content risk signals
+  const contentRisks = detectContentRisks(result);
+  const contentRiskLevel = assessContentRiskLevel(contentRisks);
+  const contentRiskTypes = new Set(contentRisks.map((r) => r.type));
+
+  for (const risk of contentRisks) {
+    const key = `content:${risk.type}`;
+    // Avoid duplicates (same type from different sources)
+    if (signals.some((s) => s.key === key)) continue;
+
+    const CONTENT_LABELS: Record<string, string> = {
+      account_threat: "Kontosperrung/-bedrohung im Inhalt",
+      urgent_action: "Dringlichkeits-/Handlungsdruck",
+      credential_lure: "Aufforderung zur Passwort-/Login-Eingabe",
+      payment_lure: "Zahlungsaufforderung/-drohung",
+      generic_branding: "Generische Anrede ohne persönlichen Bezug",
+      deletion_threat: "Löschungsdrohung für Daten/Konto",
+    };
+
+    signals.push(makeSignal({
+      key,
+      label: CONTENT_LABELS[risk.type] || risk.type,
+      severity: risk.type === "generic_branding" ? "noteworthy" : "critical",
+      tier: risk.type === "generic_branding" ? 3 : 5,
+      domain: "content",
+      category: "content_risk",
+      sourceType: "content_analysis",
+      sourceRef: `${risk.source}:${risk.type}`,
+      evidenceText: risk.matchedText,
+      promotable: true,
+      downgradeEligible: false,
+    }));
+  }
+
+  // 10. Reputation unknown signal (failed scans ≠ clean)
+  if (linkStats.total > 0 && linkStats.scansFailed > 0) {
+    const failRatio = linkStats.scansFailed / Math.max(1, linkStats.scansFailed + linkStats.scansCompleted);
+    // If more than half the scans failed, or all scans failed, this is noteworthy
+    const isSignificant = failRatio >= 0.5 || linkStats.scansCompleted === 0;
+    if (isSignificant) {
+      const severityLevel: EvidenceSeverity = contentRiskLevel === "high" ? "critical" : "noteworthy";
+      signals.push(makeSignal({
+        key: "reputation:unknown",
+        label: `${linkStats.scansFailed} Reputations-Scan(s) fehlgeschlagen — Ergebnis unsicher`,
+        severity: severityLevel,
+        tier: contentRiskLevel === "high" ? 4 : 3,
+        domain: "links",
+        category: "reputation_coverage",
+        sourceType: "reputation_scan",
+        sourceRef: `failed:${linkStats.scansFailed},completed:${linkStats.scansCompleted}`,
+        evidenceText: `${linkStats.scansFailed} von ${linkStats.scansFailed + linkStats.scansCompleted} Reputations-Scans fehlgeschlagen. Ergebnis ist nicht belastbar.`,
+        promotable: true,
+        downgradeEligible: false,
+      }));
+    }
+  }
+
+  // 11. Auth reweighting: demote auth:*:pass when content risk is high
+  // Auth pass becomes "context" tier (hygiene, not exoneration) instead of "positive"
+  if (contentRiskLevel === "high") {
+    for (const s of signals) {
+      if (s.domain === "auth" && s.direction === "positive" && s.severity === "positive") {
+        s.severity = "context";
+        s.tier = 1 as typeof PRIORITY_TIER.CONTEXT;
+        s.direction = "positive"; // still positive, but demoted
+        s.promotable = false; // no longer a decision factor
+      }
+    }
+    // Also demote "links:clean" if reputation is unknown
+    const hasUnknownReputation = signals.some((s) => s.key === "reputation:unknown");
+    if (hasUnknownReputation) {
+      for (const s of signals) {
+        if (s.key === "links:clean") {
+          s.severity = "context";
+          s.tier = 1 as typeof PRIORITY_TIER.CONTEXT;
+          s.promotable = false;
+        }
+      }
+    }
   }
 
   return signals;
