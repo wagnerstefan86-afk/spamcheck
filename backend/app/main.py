@@ -9,7 +9,10 @@ from sqlalchemy.orm import Session
 from .config import get_settings, Settings
 from .database import get_db, init_db
 from .models import AnalysisJob, ExtractedLink, ExternalCheckResult, LlmAssessment
-from .schemas import JobStatusResponse, JobResultResponse, LinkResponse, LlmAssessmentResponse, SenderInfo, ExternalCheckResponse
+from .schemas import (
+    JobStatusResponse, JobResultResponse, LinkResponse, LlmAssessmentResponse,
+    SenderInfo, ExternalCheckResponse, PipelineTraceResponse,
+)
 from .services.analysis_runner import run_analysis
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -17,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="MailScope Email Security Analysis",
-    version="2.0.0",
+    version="3.0.0",
     description="Analysiert E-Mail-Dateien auf Phishing, Spoofing und andere Sicherheitsrisiken.",
 )
 
@@ -111,12 +114,16 @@ async def get_job_result(job_id: str, db: Session = Depends(get_db)):
             is_shortener=link.is_shortener,
             is_tracking_heavy=link.is_tracking_heavy,
             is_safelink=link.is_safelink,
+            dedup_key=link.dedup_key,
+            verdict=link.verdict,
             external_checks=[ExternalCheckResponse(
                 service=c.service,
                 status=c.status,
+                scan_status=c.scan_status or "unknown",
                 malicious_count=c.malicious_count,
                 suspicious_count=c.suspicious_count,
                 result_summary=c.result_summary or {},
+                result_fetched=c.result_fetched or False,
             ) for c in checks],
         ))
 
@@ -166,9 +173,30 @@ async def get_job_result(job_id: str, db: Session = Depends(get_db)):
         deterministic_scores=det_scores,
         deterministic_findings=job.deterministic_findings or [],
         assessment=assessment,
+        reputation_stats=job.reputation_stats,
         enable_virustotal=settings.enable_virustotal,
         enable_urlscan=settings.enable_urlscan,
         enable_llm=settings.enable_llm,
+    )
+
+
+@app.get("/api/jobs/{job_id}/trace", response_model=PipelineTraceResponse)
+async def get_job_trace(job_id: str, db: Session = Depends(get_db)):
+    """Debug endpoint: returns the full pipeline trace for a job.
+
+    Shows every step that was executed, with timestamps, status, and details.
+    Use this to verify whether API calls were actually made and results fetched.
+    """
+    job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+    if not job:
+        raise HTTPException(404, "Job nicht gefunden")
+
+    return PipelineTraceResponse(
+        job_id=job.id,
+        status=job.status,
+        summary=job.pipeline_summary or {},
+        events=job.pipeline_trace or [],
+        reputation_stats=job.reputation_stats or {},
     )
 
 
@@ -191,6 +219,8 @@ async def export_job(job_id: str, db: Session = Depends(get_db)):
             "normalized_url": link.normalized_url,
             "hostname": link.hostname,
             "display_text": link.display_text,
+            "dedup_key": link.dedup_key,
+            "verdict": link.verdict,
             "flags": {
                 "display_mismatch": link.has_display_mismatch,
                 "suspicious_tld": link.is_suspicious_tld,
@@ -203,9 +233,11 @@ async def export_job(job_id: str, db: Session = Depends(get_db)):
             "external_checks": [{
                 "service": c.service,
                 "status": c.status,
+                "scan_status": c.scan_status,
                 "malicious_count": c.malicious_count,
                 "suspicious_count": c.suspicious_count,
                 "result_summary": c.result_summary,
+                "result_fetched": c.result_fetched,
             } for c in checks],
         })
 
@@ -249,5 +281,7 @@ async def export_job(job_id: str, db: Session = Depends(get_db)):
         "deterministic_findings": job.deterministic_findings,
         "links": link_data,
         "assessment": assessment,
+        "reputation_stats": job.reputation_stats,
         "warnings": job.warnings,
+        "pipeline_summary": job.pipeline_summary,
     }

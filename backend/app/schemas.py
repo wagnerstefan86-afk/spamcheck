@@ -18,9 +18,11 @@ class JobStatusResponse(BaseModel):
 class ExternalCheckResponse(BaseModel):
     service: str
     status: str
+    scan_status: str = "unknown"
     malicious_count: int
     suspicious_count: int
     result_summary: dict
+    result_fetched: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -38,6 +40,8 @@ class LinkResponse(BaseModel):
     is_shortener: bool
     is_tracking_heavy: bool
     is_safelink: bool
+    dedup_key: Optional[str] = None
+    verdict: Optional[str] = None
     external_checks: list[ExternalCheckResponse] = []
 
     model_config = {"from_attributes": True}
@@ -89,8 +93,19 @@ class JobResultResponse(BaseModel):
     deterministic_scores: Optional[dict] = None
     deterministic_findings: list[dict] = []
     assessment: Optional[LlmAssessmentResponse] = None
+    reputation_stats: Optional[dict] = None
     enable_virustotal: bool = True
     enable_urlscan: bool = True
     enable_llm: bool = True
+
+    model_config = {"from_attributes": True}
+
+
+class PipelineTraceResponse(BaseModel):
+    job_id: str
+    status: str
+    summary: dict
+    events: list[dict]
+    reputation_stats: dict
 
     model_config = {"from_attributes": True}

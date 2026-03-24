@@ -40,6 +40,13 @@ class AnalysisJob(Base):
     legitimacy_likelihood_score = Column(Integer, nullable=True)
     deterministic_findings = Column(JSON, default=list)
 
+    # Pipeline trace — structured events for observability
+    pipeline_trace = Column(JSON, default=list)
+    pipeline_summary = Column(JSON, default=dict)
+
+    # Reputation pipeline stats
+    reputation_stats = Column(JSON, default=dict)
+
     links = relationship("ExtractedLink", back_populates="job", cascade="all, delete-orphan")
     llm_assessment = relationship("LlmAssessment", back_populates="job", uselist=False, cascade="all, delete-orphan")
 
@@ -61,6 +68,12 @@ class ExtractedLink(Base):
     is_tracking_heavy = Column(Boolean, default=False)
     is_safelink = Column(Boolean, default=False)
 
+    # Dedup key for provider-level dedup
+    dedup_key = Column(String, nullable=True)
+
+    # Aggregated verdict across all providers
+    verdict = Column(String, nullable=True)  # LinkVerdict value
+
     job = relationship("AnalysisJob", back_populates="links")
     external_checks = relationship("ExternalCheckResult", back_populates="link", cascade="all, delete-orphan")
 
@@ -72,10 +85,12 @@ class ExternalCheckResult(Base):
     link_id = Column(Integer, ForeignKey("extracted_links.id"), nullable=False)
     service = Column(String, nullable=False)  # virustotal, urlscan
     submission_id = Column(String, nullable=True)
-    status = Column(String, default="pending")  # pending, completed, failed, timeout
+    status = Column(String, default="pending")  # legacy: pending, completed, failed, timeout
+    scan_status = Column(String, default="queued")  # ScanStatus enum value — granular
     result_summary = Column(JSON, default=dict)
     malicious_count = Column(Integer, default=0)
     suspicious_count = Column(Integer, default=0)
+    result_fetched = Column(Boolean, default=False)  # confirms API result was actually downloaded
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     link = relationship("ExtractedLink", back_populates="external_checks")
