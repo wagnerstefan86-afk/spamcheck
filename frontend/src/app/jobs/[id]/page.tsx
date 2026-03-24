@@ -6,7 +6,7 @@ import axios from "axios";
 import StatusView from "@/components/StatusView";
 import ResultView from "@/components/ResultView";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API = "";
 
 type JobStatus = {
   id: string;
