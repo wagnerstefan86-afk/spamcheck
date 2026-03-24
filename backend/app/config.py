@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # App config
     max_upload_size_mb: int = 25
-    database_url: str = "sqlite:///./mailscope.db"
+    database_url: str = "sqlite:///./data/mailscope.db"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
