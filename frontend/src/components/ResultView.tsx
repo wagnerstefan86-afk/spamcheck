@@ -4,17 +4,20 @@ import { useMemo } from "react";
 import DecisionHeader from "./DecisionHeader";
 import EvidenceGroups from "./EvidenceGroups";
 import IdentityBlock from "./IdentityBlock";
+import ConflictExplanation from "./ConflictExplanation";
 import LinkSummary from "./LinkSummary";
 import SenderInfo from "./SenderInfo";
 import ScoreDetails from "./ScoreDetails";
 import Accordion from "./Accordion";
 import {
+  assessIdentity,
+  collectSignals,
+  assessConflict,
   classifyEvidence,
   summarizeLinks,
-  assessIdentity,
   extractScoreDrivers,
   generateDecisionExplanation,
-} from "../lib/classifyEvidence";
+} from "../lib/analysis";
 
 type Props = {
   result: any;
@@ -24,18 +27,37 @@ type Props = {
 export default function ResultView({ result, onDownload }: Props) {
   const a = result.assessment;
 
-  const evidenceGroups = useMemo(() => classifyEvidence(result), [result]);
-  const linkStats = useMemo(() => summarizeLinks(result.links || []), [result.links]);
+  // 1. Identity & auth assessment
   const identity = useMemo(() => assessIdentity(result), [result]);
+
+  // 2. Link analysis
+  const linkStats = useMemo(() => summarizeLinks(result.links || []), [result.links]);
+
+  // 3. Priority signals → conflict assessment
+  const signals = useMemo(
+    () => collectSignals(identity, linkStats, result.header_findings || [], result.deterministic_findings || []),
+    [identity, linkStats, result.header_findings, result.deterministic_findings]
+  );
+  const conflict = useMemo(() => assessConflict(signals, identity), [signals, identity]);
+
+  // 4. Evidence classification (uses guarded bulk downgrade)
+  const evidenceGroups = useMemo(
+    () => classifyEvidence(result, identity.isBulkSender, signals, identity.authSignals),
+    [result, identity.isBulkSender, signals, identity.authSignals]
+  );
+
+  // 5. Score drivers
   const scoreDrivers = useMemo(() => extractScoreDrivers(result), [result]);
+
+  // 6. Decision explanation (conflict-aware)
   const generatedExplanation = useMemo(
-    () => generateDecisionExplanation(result, identity, linkStats),
-    [result, identity, linkStats]
+    () => generateDecisionExplanation(result, identity, linkStats, conflict),
+    [result, identity, linkStats, conflict]
   );
 
   return (
     <div className="space-y-5">
-      {/* Service status badges — small, unobtrusive */}
+      {/* Service status badges */}
       <div className="flex flex-wrap gap-2">
         {[
           { label: "VirusTotal", active: result.enable_virustotal },
@@ -58,32 +80,36 @@ export default function ResultView({ result, onDownload }: Props) {
         )}
       </div>
 
-      {/* 1. DECISION HEADER — Above the fold */}
+      {/* 1. DECISION HEADER */}
       <DecisionHeader assessment={a} />
 
-      {/* 2. DECISION EXPLANATION — Short, data-driven */}
+      {/* 2. DECISION EXPLANATION + CONFLICT */}
       {a && (
-        <div className="card">
-          <p className="text-xs text-text-secondary uppercase tracking-wider font-semibold mb-2">Kurzbegründung</p>
-          {a.analyst_summary && (
-            <p className="text-sm text-text-primary leading-relaxed">{a.analyst_summary}</p>
-          )}
-          {/* Show generated explanation if no LLM summary, or as supplement */}
-          {generatedExplanation && (
-            <p className={`text-sm leading-relaxed ${a.analyst_summary ? "text-text-primary/60 mt-1.5" : "text-text-primary"}`}>
-              {generatedExplanation}
-            </p>
-          )}
-          {a.rationale && a.rationale !== a.analyst_summary && !generatedExplanation && (
-            <p className="text-sm text-text-primary/70 leading-relaxed mt-1.5">{a.rationale}</p>
-          )}
+        <div className="space-y-3">
+          <div className="card">
+            <p className="text-xs text-text-secondary uppercase tracking-wider font-semibold mb-2">Kurzbegründung</p>
+            {a.analyst_summary && (
+              <p className="text-sm text-text-primary leading-relaxed">{a.analyst_summary}</p>
+            )}
+            {generatedExplanation && (
+              <p className={`text-sm leading-relaxed ${a.analyst_summary ? "text-text-primary/60 mt-1.5" : "text-text-primary"}`}>
+                {generatedExplanation}
+              </p>
+            )}
+            {a.rationale && a.rationale !== a.analyst_summary && !generatedExplanation && (
+              <p className="text-sm text-text-primary/70 leading-relaxed mt-1.5">{a.rationale}</p>
+            )}
+          </div>
+
+          {/* Conflict explanation — only shown when mixed signals exist */}
+          <ConflictExplanation conflict={conflict} />
         </div>
       )}
 
-      {/* 3. EVIDENCE GROUPS — Critical → Noteworthy → Positive → Context */}
+      {/* 3. EVIDENCE GROUPS */}
       <EvidenceGroups groups={evidenceGroups} />
 
-      {/* Warnings — only if present */}
+      {/* Warnings */}
       {result.warnings?.length > 0 && (
         <div className="card border border-amber-200 bg-amber-50/30">
           <div className="flex items-start gap-3">
@@ -102,21 +128,21 @@ export default function ResultView({ result, onDownload }: Props) {
         </div>
       )}
 
-      {/* 4. IDENTITY & AUTH — Compact verdichteter Block */}
+      {/* 4. IDENTITY & AUTH */}
       <IdentityBlock identity={identity} />
 
-      {/* 5. SENDER CONTEXT — Compact */}
+      {/* 5. SENDER CONTEXT */}
       <SenderInfo result={result} />
 
-      {/* 6. LINK SUMMARY — Compact with reasons for critical links */}
+      {/* 6. LINK SUMMARY */}
       <LinkSummary links={result.links || []} stats={linkStats} />
 
-      {/* 7. SCORE DETAILS — Secondary, with drivers */}
+      {/* 7. SCORE DETAILS */}
       {result.deterministic_scores && (
         <ScoreDetails scores={result.deterministic_scores} drivers={scoreDrivers} />
       )}
 
-      {/* 8. TECHNICAL DETAILS — Collapsed by default */}
+      {/* 8. TECHNICAL DETAILS */}
       <Accordion title="Technische Details">
         <div className="text-xs text-text-secondary space-y-2.5">
           <p><strong className="text-text-primary">Authentication-Results:</strong> {result.authentication_results || "\u2014"}</p>
