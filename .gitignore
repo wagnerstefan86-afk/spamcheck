@@ -8,3 +8,4 @@ dist/
 .env
 *.egg-info/
 *.db
+*.tsbuildinfo
