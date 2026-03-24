@@ -23,8 +23,8 @@ export default function DecisionFactors({ factors, conflict }: Props) {
           <div className="rounded-lg bg-red-50/50 border border-red-200/70 px-3.5 py-2.5">
             <p className="text-[11px] font-semibold text-red-600 uppercase tracking-wider mb-2">Belastend</p>
             <ul className="space-y-1.5">
-              {factors.negative.map((s, i) => (
-                <li key={i} className="flex items-start gap-2 text-[13px] text-text-primary/80 leading-snug">
+              {factors.negative.map((s) => (
+                <li key={s.key} className="flex items-start gap-2 text-[13px] text-text-primary/80 leading-snug">
                   <span className="w-1.5 h-1.5 rounded-full bg-red-500 mt-1.5 shrink-0" />
                   {s.label}
                 </li>
@@ -38,8 +38,8 @@ export default function DecisionFactors({ factors, conflict }: Props) {
           <div className="rounded-lg bg-emerald-50/50 border border-emerald-200/70 px-3.5 py-2.5">
             <p className="text-[11px] font-semibold text-emerald-600 uppercase tracking-wider mb-2">Entlastend</p>
             <ul className="space-y-1.5">
-              {factors.positive.map((s, i) => (
-                <li key={i} className="flex items-start gap-2 text-[13px] text-text-primary/80 leading-snug">
+              {factors.positive.map((s) => (
+                <li key={s.key} className="flex items-start gap-2 text-[13px] text-text-primary/80 leading-snug">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-1.5 shrink-0" />
                   {s.label}
                 </li>

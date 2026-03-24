@@ -1,8 +1,6 @@
 /**
  * Backward-compatibility re-export.
- *
- * All logic has moved to lib/analysis/*.ts modules.
- * This file exists so existing imports continue to work.
+ * All logic lives in lib/analysis/*.ts modules.
  */
 
 export type {
@@ -14,6 +12,7 @@ export type {
   CriticalLink,
   LinkStats,
   ScoreDriver,
+  PrioritizedSignal,
   ConflictAssessment,
 } from "./analysis";
 
@@ -23,10 +22,9 @@ export {
   extractScoreDrivers,
   collectSignals,
   assessConflict,
+  classifyEvidence,
+  generateDecisionExplanation,
+  extractDecisionFactors,
 } from "./analysis";
 
-// classifyEvidence and generateDecisionExplanation have changed signatures
-// (they now require additional parameters). Components should import from
-// ./analysis directly. These re-exports are kept for type-compatibility.
-export { classifyEvidence } from "./analysis";
-export { generateDecisionExplanation } from "./analysis";
+export type { DecisionFactors } from "./analysis";

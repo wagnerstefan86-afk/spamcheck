@@ -1,10 +1,19 @@
 /**
  * Shared types for the analysis module.
+ *
+ * Key design: every signal and evidence item carries a stable `key`
+ * derived from its source and semantic type. This enables explicit
+ * dedup/promotion without fuzzy text matching.
+ *
+ * Key format: "domain:type[:qualifier]"
+ * Examples: "auth:spf:pass", "link:malicious:3", "identity:mismatch:partial"
  */
 
 export type EvidenceSeverity = "positive" | "noteworthy" | "critical" | "context";
 
 export type EvidenceItem = {
+  /** Stable identifier for dedup/promotion. Format: "source:type[:qualifier]" */
+  key: string;
   text: string;
   source: "evidence" | "header" | "link" | "auth" | "scoring";
   severity: EvidenceSeverity;
@@ -72,25 +81,19 @@ export const PRIORITY_TIER = {
 
 export type PriorityTier = (typeof PRIORITY_TIER)[keyof typeof PRIORITY_TIER];
 
-/**
- * Describes a signal with its priority for conflict resolution.
- */
 export type PrioritizedSignal = {
+  /** Stable identifier. Format: "domain:type[:qualifier]" */
+  key: string;
   tier: PriorityTier;
   domain: "auth" | "links" | "identity" | "content" | "bulk";
   label: string;
   direction: "positive" | "negative";
 };
 
-/**
- * Result of conflict analysis: which signals are in tension,
- * which one dominates, and a human-readable explanation.
- */
 export type ConflictAssessment = {
   hasConflict: boolean;
   dominantSignal: PrioritizedSignal | null;
   explanation: string | null;
-  /** Whether bulk-context downgrade was applied and why */
   bulkDowngradeApplied: boolean;
   bulkDowngradeBlocked: boolean;
   bulkDowngradeBlockReason: string | null;

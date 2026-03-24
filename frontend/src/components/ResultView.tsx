@@ -110,7 +110,7 @@ export default function ResultView({ result, onDownload }: Props) {
       <IdentityBlock identity={identity} />
 
       {/* ── 5. SUPPORTING EVIDENCE (collapsed, deduplicated) ── */}
-      <EvidenceGroups groups={evidenceGroups} promotedLabels={decisionFactors.promotedLabels} />
+      <EvidenceGroups groups={evidenceGroups} promotedKeys={decisionFactors.promotedKeys} />
 
       {/* Warnings */}
       {result.warnings?.length > 0 && (
