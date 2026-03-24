@@ -158,19 +158,20 @@ describe("Improved source references", () => {
     expect(bulk!.sourceRef).toBe("classification:advertising");
   });
 
-  it("clean links reference total count", () => {
+  it("clean links reference verified and total count", () => {
     const result = makeResult({
       links: [{
         id: 1, normalized_url: "http://safe.com", hostname: "safe.com",
         is_ip_literal: false, is_punycode: false, has_display_mismatch: false,
         is_suspicious_tld: false, is_shortener: false, is_tracking_heavy: false,
-        is_safelink: false, external_checks: [],
+        is_safelink: false, verdict: "clean",
+        external_checks: [{ status: "completed", service: "VT", malicious_count: 0, suspicious_count: 0, result_fetched: true, scan_status: "completed_clean" }],
       }],
     });
     const { normalized } = analyzeResult(result);
     const clean = normalized.find((s) => s.key === "links:clean");
     expect(clean).toBeDefined();
-    expect(clean!.sourceRef).toBe("total:1");
+    expect(clean!.sourceRef).toBe("verified:1,total:1");
   });
 });
 

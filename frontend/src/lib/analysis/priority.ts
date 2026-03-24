@@ -97,7 +97,8 @@ function generateConflictExplanation(
   bulkDowngradeApplied: boolean
 ): string {
   const hasAuthPositive = positives.some((p) => p.domain === "auth");
-  const hasCleanLinks = positives.some((p) => p.domain === "links");
+  // Only consider links as truly clean if the signal is links:clean (verified), not partial/unknown
+  const hasVerifiedCleanLinks = positives.some((p) => p.key === "links:clean" && p.tier >= 2);
 
   if (dominant.tier === 5) {
     if (dominant.domain === "links") {
@@ -106,12 +107,17 @@ function generateConflictExplanation(
         : "Ein kritischer Link-Befund ist ausschlaggebend für die Bewertung.";
     }
     if (dominant.domain === "auth") {
-      return hasCleanLinks
-        ? "Links sind unauffällig, aber eine fehlgeschlagene Authentifizierung bleibt ein starkes Warnsignal."
+      return hasVerifiedCleanLinks
+        ? "Keine negativen Reputationstreffer bei Links, aber eine fehlgeschlagene Authentifizierung bleibt ein starkes Warnsignal."
         : "Fehlgeschlagene Authentifizierung ist das dominierende Risikosignal.";
     }
     if (dominant.domain === "identity") {
       return "Trotz positiver Einzelsignale bleibt die Identitätsabweichung ein starkes Warnsignal.";
+    }
+    if (dominant.domain === "content") {
+      return hasAuthPositive
+        ? "Technische Authentifizierung ist valide, belegt aber nicht die Gutartigkeit des Inhalts."
+        : "Inhaltliche Risikomerkmale sind ausschlaggebend für die Bewertung.";
     }
   }
 

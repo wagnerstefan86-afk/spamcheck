@@ -323,16 +323,58 @@ export function normalizeSignals(
     }));
   }
 
+  // Reputation coverage signals — derived from backend verdicts, not from absence of negatives
   if (linkStats.total > 0 && linkStats.malicious === 0 && linkStats.criticalLinks.length === 0) {
-    signals.push(makeSignal({
-      key: "links:clean",
-      label: "Alle Links reputationsmäßig unauffällig",
-      severity: "positive", tier: 2, domain: "links", category: "link_reputation",
-      sourceType: "link_analysis",
-      sourceRef: `total:${linkStats.total}`,
-      evidenceText: null,
-      promotable: true, downgradeEligible: false,
-    }));
+    const cov = linkStats.reputationCoverage;
+
+    if (cov === "clean") {
+      // Truly verified clean: at least one provider confirmed clean for every link
+      signals.push(makeSignal({
+        key: "links:clean",
+        label: "Keine negativen Reputationstreffer erkannt",
+        severity: "positive", tier: 2, domain: "links", category: "link_reputation",
+        sourceType: "link_analysis",
+        sourceRef: `verified:${linkStats.resultFetchedCount},total:${linkStats.total}`,
+        evidenceText: null,
+        promotable: true, downgradeEligible: false,
+      }));
+    } else if (cov === "partially_analyzed") {
+      // Some verified, some not — no strong positive claim
+      signals.push(makeSignal({
+        key: "links:partial",
+        label: "Keine negativen Treffer erkannt, Bewertung jedoch unvollständig",
+        severity: "context", tier: 1, domain: "links", category: "reputation_coverage",
+        sourceType: "link_analysis",
+        sourceRef: `verified:${linkStats.resultFetchedCount},total:${linkStats.total}`,
+        evidenceText: `${linkStats.resultFetchedCount} von ${linkStats.total} Links mit belastbarem Ergebnis geprüft.`,
+        promotable: true, downgradeEligible: false,
+        direction: "positive",
+      }));
+    } else if (cov === "not_checked") {
+      // No providers executed at all
+      signals.push(makeSignal({
+        key: "links:not_checked",
+        label: "Keine belastbare Reputationsbewertung verfügbar",
+        severity: "noteworthy", tier: 3, domain: "links", category: "reputation_coverage",
+        sourceType: "link_analysis",
+        sourceRef: `total:${linkStats.total},checked:0`,
+        evidenceText: "Reputationsprüfung wurde nicht ausgeführt. Keine Entwarnung möglich.",
+        promotable: true, downgradeEligible: false,
+        direction: "negative",
+      }));
+    } else {
+      // unknown — providers ran but returned no usable results
+      signals.push(makeSignal({
+        key: "links:unknown",
+        label: "Reputationsbewertung nicht belastbar",
+        severity: "noteworthy", tier: 3, domain: "links", category: "reputation_coverage",
+        sourceType: "link_analysis",
+        sourceRef: `verified:${linkStats.resultFetchedCount},total:${linkStats.total}`,
+        evidenceText: "Kein belastbares Ergebnis von Reputationsdiensten erhalten. Keine Entwarnung möglich.",
+        promotable: true, downgradeEligible: false,
+        direction: "negative",
+      }));
+    }
   }
 
   // 4. Bulk context (with detection source)
@@ -477,9 +519,12 @@ export function normalizeSignals(
   }
 
   // 10. Reputation unknown signal (failed scans ≠ clean)
-  if (linkStats.total > 0 && linkStats.scansFailed > 0) {
+  // Only emit if we haven't already created a links:unknown or links:not_checked signal
+  const hasReputationGapSignal = signals.some((s) =>
+    s.key === "links:unknown" || s.key === "links:not_checked" || s.key === "links:partial"
+  );
+  if (linkStats.total > 0 && linkStats.scansFailed > 0 && !hasReputationGapSignal) {
     const failRatio = linkStats.scansFailed / Math.max(1, linkStats.scansFailed + linkStats.scansCompleted);
-    // If more than half the scans failed, or all scans failed, this is noteworthy
     const isSignificant = failRatio >= 0.5 || linkStats.scansCompleted === 0;
     if (isSignificant) {
       const severityLevel: EvidenceSeverity = contentRiskLevel === "high" ? "critical" : "noteworthy";
@@ -499,26 +544,46 @@ export function normalizeSignals(
     }
   }
 
-  // 11. Auth reweighting: demote auth:*:pass when content risk is high
-  // Auth pass becomes "context" tier (hygiene, not exoneration) instead of "positive"
+  // 11. Hard rules for reputation entlastung
+  //
+  // Rule A: When content risk is high, demote auth passes to context (hygiene, not exoneration)
+  // Rule B: When content risk is high, links:clean must not be a dominant positive factor
+  // Rule C: When result_fetched === 0, never allow clean — already handled by coverage logic above
   if (contentRiskLevel === "high") {
     for (const s of signals) {
+      // Rule A: Auth demoted to context
       if (s.domain === "auth" && s.direction === "positive" && s.severity === "positive") {
         s.severity = "context";
         s.tier = 1 as typeof PRIORITY_TIER.CONTEXT;
-        s.direction = "positive"; // still positive, but demoted
-        s.promotable = false; // no longer a decision factor
+        s.direction = "positive";
+        s.promotable = false;
+      }
+      // Rule B: links:clean demoted — reputation cannot strongly exonerate when content is risky
+      if (s.key === "links:clean") {
+        s.severity = "context";
+        s.tier = 1 as typeof PRIORITY_TIER.CONTEXT;
+        s.promotable = false;
+        s.label = "Keine negativen Reputationstreffer, aber Bewertung nicht ausreichend zur Entlastung";
+      }
+      // Also demote links:partial in high-risk context
+      if (s.key === "links:partial") {
+        s.severity = "context";
+        s.tier = 1 as typeof PRIORITY_TIER.CONTEXT;
+        s.promotable = false;
       }
     }
-    // Also demote "links:clean" if reputation is unknown
-    const hasUnknownReputation = signals.some((s) => s.key === "reputation:unknown");
-    if (hasUnknownReputation) {
-      for (const s of signals) {
-        if (s.key === "links:clean") {
-          s.severity = "context";
-          s.tier = 1 as typeof PRIORITY_TIER.CONTEXT;
-          s.promotable = false;
-        }
+  }
+
+  // Rule C: If unknown reputation exists, also demote any accidentally remaining clean signal
+  const hasReputationGap = signals.some((s) =>
+    s.key === "reputation:unknown" || s.key === "links:unknown" || s.key === "links:not_checked"
+  );
+  if (hasReputationGap) {
+    for (const s of signals) {
+      if (s.key === "links:clean") {
+        s.severity = "context";
+        s.tier = 1 as typeof PRIORITY_TIER.CONTEXT;
+        s.promotable = false;
       }
     }
   }

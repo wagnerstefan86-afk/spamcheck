@@ -15,6 +15,7 @@ export type {
   IdentityAssessment,
   CriticalLink,
   LinkStats,
+  ReputationCoverage,
   ScoreDriver,
   PrioritizedSignal,
   ConflictAssessment,

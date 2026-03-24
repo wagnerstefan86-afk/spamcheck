@@ -169,57 +169,56 @@ describe("Auth reweighting on high content risk", () => {
 // ─── Reputation Unknown ─────────────────────────────────────────────────────
 
 describe("Reputation unknown signal", () => {
-  it("creates reputation:unknown when scans fail", () => {
+  it("creates links:unknown when scans fail and no result_fetched", () => {
     const result = makeResult({
       links: [{
         id: 1, normalized_url: "http://example.com", hostname: "example.com",
         is_ip_literal: false, is_punycode: false, has_display_mismatch: false,
         is_suspicious_tld: false, is_shortener: false, is_tracking_heavy: false,
-        is_safelink: false,
+        is_safelink: false, verdict: "unknown",
         external_checks: [
-          { status: "error", service: "VT" },
-          { status: "timeout", service: "urlscan" },
+          { status: "error", service: "VT", result_fetched: false, scan_status: "api_error" },
+          { status: "timeout", service: "urlscan", result_fetched: false, scan_status: "timeout" },
         ],
       }],
     });
     const { normalized } = analyzeResult(result);
-    const unknown = normalized.find((s) => s.key === "reputation:unknown");
+    const unknown = normalized.find((s) => s.key === "links:unknown");
     expect(unknown).toBeDefined();
     expect(unknown!.severity).toBe("noteworthy");
-    expect(unknown!.sourceType).toBe("reputation_scan");
+    expect(unknown!.sourceType).toBe("link_analysis");
   });
 
-  it("reputation:unknown is critical when combined with high content risk", () => {
+  it("links:unknown is present when combined with high content risk", () => {
     const result = makeResult({
       subject: "Konto gesperrt - sofort handeln",
       links: [{
         id: 1, normalized_url: "http://suspicious.com", hostname: "suspicious.com",
         is_ip_literal: false, is_punycode: false, has_display_mismatch: false,
         is_suspicious_tld: false, is_shortener: false, is_tracking_heavy: false,
-        is_safelink: false,
-        external_checks: [{ status: "error", service: "VT" }],
+        is_safelink: false, verdict: "unknown",
+        external_checks: [{ status: "error", service: "VT", result_fetched: false, scan_status: "api_error" }],
       }],
     });
     const { normalized, contentRiskLevel } = analyzeResult(result);
 
     expect(contentRiskLevel).toBe("high");
-    const unknown = normalized.find((s) => s.key === "reputation:unknown");
+    // links:unknown should exist — no clean entlastung possible
+    const unknown = normalized.find((s) => s.key === "links:unknown");
     expect(unknown).toBeDefined();
-    expect(unknown!.severity).toBe("critical");
-    expect(unknown!.tier).toBe(4);
+    expect(unknown!.direction).toBe("negative");
   });
 
-  it("links:clean is demoted when reputation is unknown + content risk high", () => {
+  it("links:clean is demoted when content risk is high", () => {
     const result = makeResult({
       subject: "Ihr Passwort ist abgelaufen",
       links: [{
         id: 1, normalized_url: "http://clean.com", hostname: "clean.com",
         is_ip_literal: false, is_punycode: false, has_display_mismatch: false,
         is_suspicious_tld: false, is_shortener: false, is_tracking_heavy: false,
-        is_safelink: false,
+        is_safelink: false, verdict: "clean",
         external_checks: [
-          { status: "completed", service: "VT", malicious_count: 0, suspicious_count: 0 },
-          { status: "error", service: "urlscan" },
+          { status: "completed", service: "VT", malicious_count: 0, suspicious_count: 0, result_fetched: true, scan_status: "completed_clean" },
         ],
       }],
     });

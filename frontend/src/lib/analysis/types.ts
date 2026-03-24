@@ -169,6 +169,17 @@ export type CriticalLink = {
   reasons: string[];
 };
 
+/**
+ * Reputation coverage status derived from backend verdicts.
+ *
+ * - "clean": all links have belastbare provider results, none negative
+ * - "partially_analyzed": some links verified, some not
+ * - "unknown": no belastbare results despite links existing
+ * - "not_checked": no providers were executed at all
+ * - "none": no links in the email
+ */
+export type ReputationCoverage = "clean" | "partially_analyzed" | "unknown" | "not_checked" | "none";
+
 export type LinkStats = {
   total: number;
   malicious: number;
@@ -176,6 +187,20 @@ export type LinkStats = {
   scansFailed: number;
   scansCompleted: number;
   criticalLinks: CriticalLink[];
+
+  /** Number of links where at least one provider returned result_fetched=true */
+  resultFetchedCount: number;
+  /** Verdict counts from backend (link.verdict field) */
+  verdicts: {
+    clean: number;
+    suspicious: number;
+    malicious: number;
+    unknown: number;
+    partially_analyzed: number;
+    not_checked: number;
+  };
+  /** Aggregated reputation coverage status */
+  reputationCoverage: ReputationCoverage;
 };
 
 export type ScoreDriver = {

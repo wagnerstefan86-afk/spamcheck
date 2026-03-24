@@ -115,10 +115,21 @@ export function generateDecisionExplanation(
     parts.push(`Authentifizierung (${protocols}) ist valide.`);
   }
 
-  // Reputation unknown
+  // Reputation coverage — use new granular signals
   const reputationUnknown = signals.find((s) => s.key === "reputation:unknown");
-  if (reputationUnknown) {
+  const linksUnknown = signals.find((s) => s.key === "links:unknown");
+  const linksNotChecked = signals.find((s) => s.key === "links:not_checked");
+  const linksPartial = signals.find((s) => s.key === "links:partial");
+  const hasReputationGap = reputationUnknown || linksUnknown || linksNotChecked;
+
+  if (linksNotChecked) {
+    parts.push("Reputationsprüfung wurde nicht ausgeführt — keine Entwarnung möglich.");
+  } else if (linksUnknown) {
+    parts.push("Reputationsbewertung nicht belastbar — kein verwertbares Ergebnis erhalten.");
+  } else if (reputationUnknown) {
     parts.push("Reputations-Scans konnten nicht vollständig durchgeführt werden — Ergebnis nicht belastbar.");
+  } else if (linksPartial) {
+    parts.push("Reputationsbewertung nur für einen Teil der Links verfügbar.");
   }
 
   // Link summary from signals
@@ -129,7 +140,7 @@ export function generateDecisionExplanation(
     parts.push(`${maliciousLink.label}.`);
   } else if (structuralLink) {
     parts.push(`${structuralLink.label}.`);
-  } else if (cleanLink && !reputationUnknown) {
+  } else if (cleanLink && !hasReputationGap) {
     parts.push(`${cleanLink.label}.`);
   }
 

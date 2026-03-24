@@ -1,11 +1,28 @@
 "use client";
 
 import { useState } from "react";
-import type { LinkStats, CriticalLink } from "../lib/classifyEvidence";
+import type { LinkStats, CriticalLink, ReputationCoverage } from "../lib/analysis";
 
 type Props = {
   links: any[];
   stats: LinkStats;
+};
+
+/** Human-readable labels for reputation coverage status */
+const COVERAGE_LABELS: Record<ReputationCoverage, string> = {
+  clean: "Keine negativen Reputationstreffer erkannt",
+  partially_analyzed: "Keine negativen Treffer erkannt, Bewertung jedoch unvollständig",
+  unknown: "Reputationsbewertung nicht belastbar",
+  not_checked: "Keine belastbare Reputationsbewertung verfügbar",
+  none: "",
+};
+
+const COVERAGE_STYLE: Record<ReputationCoverage, { bg: string; text: string; border: string }> = {
+  clean: { bg: "bg-emerald-50/50", text: "text-emerald-700", border: "border-emerald-200/70" },
+  partially_analyzed: { bg: "bg-amber-50/50", text: "text-amber-700", border: "border-amber-200/70" },
+  unknown: { bg: "bg-orange-50/50", text: "text-orange-700", border: "border-orange-200/70" },
+  not_checked: { bg: "bg-gray-50", text: "text-gray-600", border: "border-gray-200" },
+  none: { bg: "", text: "", border: "" },
 };
 
 export default function LinkSummary({ links, stats }: Props) {
@@ -15,6 +32,8 @@ export default function LinkSummary({ links, stats }: Props) {
 
   const hasCritical = stats.criticalLinks.length > 0;
   const nonCriticalCount = links.length - stats.criticalLinks.length;
+  const cov = stats.reputationCoverage;
+  const covStyle = COVERAGE_STYLE[cov];
 
   return (
     <div className="card">
@@ -22,14 +41,22 @@ export default function LinkSummary({ links, stats }: Props) {
 
       {/* Compact summary bar */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-        <span className="font-medium text-text-primary">{stats.total} Links geprüft</span>
+        <span className="font-medium text-text-primary">{stats.total} Links erkannt</span>
+        {stats.malicious > 0 && (
+          <>
+            <span className="text-text-tertiary">&middot;</span>
+            <span className="text-red-600 font-semibold">{stats.malicious} maliziös</span>
+          </>
+        )}
+        {stats.suspicious > 0 && (
+          <>
+            <span className="text-text-tertiary">&middot;</span>
+            <span className="text-amber-600 font-semibold">{stats.suspicious} verdächtig</span>
+          </>
+        )}
         <span className="text-text-tertiary">&middot;</span>
-        <span className={stats.malicious > 0 ? "text-red-600 font-semibold" : "text-text-secondary"}>
-          {stats.malicious} maliziös
-        </span>
-        <span className="text-text-tertiary">&middot;</span>
-        <span className={stats.suspicious > 0 ? "text-amber-600 font-semibold" : "text-text-secondary"}>
-          {stats.suspicious} verdächtig
+        <span className="text-text-secondary">
+          {stats.resultFetchedCount} mit belastbarem Ergebnis geprüft
         </span>
         {stats.scansFailed > 0 && (
           <>
@@ -38,6 +65,23 @@ export default function LinkSummary({ links, stats }: Props) {
           </>
         )}
       </div>
+
+      {/* Reputation coverage status badge */}
+      {cov !== "none" && (
+        <div className={`mt-3 px-3 py-2 rounded-lg border ${covStyle.bg} ${covStyle.border}`}>
+          <p className={`text-xs font-medium ${covStyle.text}`}>
+            {COVERAGE_LABELS[cov]}
+          </p>
+          {(cov === "partially_analyzed" || cov === "unknown" || cov === "not_checked") && (
+            <p className="text-[11px] text-text-tertiary mt-0.5">
+              {stats.resultFetchedCount} von {stats.total} Links mit belastbarem Provider-Ergebnis
+              {stats.total - stats.resultFetchedCount > 0 && (
+                <> &middot; {stats.total - stats.resultFetchedCount} ohne belastbares Ergebnis</>
+              )}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Critical links with explicit reasons */}
       {hasCritical && (
@@ -53,7 +97,6 @@ export default function LinkSummary({ links, stats }: Props) {
                   Angezeigt als: <span className="text-text-secondary">{cl.link.display_text}</span>
                 </p>
               )}
-              {/* Explicit reasons WHY this link is critical */}
               <div className="mt-2 space-y-1">
                 {cl.reasons.map((reason, ri) => (
                   <div key={ri} className="flex items-start gap-1.5 text-xs">
@@ -82,7 +125,7 @@ export default function LinkSummary({ links, stats }: Props) {
             >
               <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
             </svg>
-            {expanded ? "Unauffällige Links ausblenden" : `${nonCriticalCount} unauffällige Links anzeigen`}
+            {expanded ? "Weitere Links ausblenden" : `${nonCriticalCount} weitere Links anzeigen`}
           </button>
 
           {expanded && (
@@ -96,8 +139,17 @@ export default function LinkSummary({ links, stats }: Props) {
                 if (link.is_safelink) tags.push("SafeLink");
                 if (link.is_shortener) tags.push("Shortener");
 
+                // Show per-link verdict if available
+                const verdict = link.verdict;
+                if (verdict === "unknown" || verdict === "not_checked") tags.push("Nicht geprüft");
+                else if (verdict === "partially_analyzed") tags.push("Teilweise geprüft");
+
                 return (
-                  <div key={link.id} className="px-3 py-2 rounded-lg bg-gray-50 border-l-2 border-emerald-400/50">
+                  <div key={link.id} className={`px-3 py-2 rounded-lg border-l-2 ${
+                    verdict === "clean" ? "bg-gray-50 border-emerald-400/50"
+                    : verdict === "unknown" || verdict === "not_checked" ? "bg-gray-50 border-gray-300/50"
+                    : "bg-gray-50 border-amber-300/50"
+                  }`}>
                     <p className="text-xs text-text-primary/70 break-all font-mono">{link.normalized_url}</p>
                     {tags.length > 0 && (
                       <div className="flex flex-wrap gap-1 mt-1">
