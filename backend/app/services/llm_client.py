@@ -151,9 +151,15 @@ async def _call_openai(messages: list[dict]) -> str | None:
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as e:
+            logger.error("OpenAI API HTTP error %s: %s – Body: %s", e.response.status_code, e, e.response.text[:500])
+            raise RuntimeError(f"OpenAI API HTTP {e.response.status_code}: {e.response.text[:200]}")
+        except httpx.TimeoutException as e:
+            logger.error("OpenAI API timeout: %s", e)
+            raise RuntimeError(f"OpenAI API Timeout nach 60s")
         except Exception as e:
             logger.error("OpenAI API call failed: %s", e)
-            return None
+            raise RuntimeError(f"OpenAI API Fehler: {e}")
 
 
 async def get_assessment(
