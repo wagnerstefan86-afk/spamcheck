@@ -38,6 +38,16 @@ def startup():
     init_db()
 
 
+def _log_task_exception(task: asyncio.Task, job_id: str):
+    """Callback to log unhandled exceptions from background analysis tasks."""
+    if task.cancelled():
+        logger.warning("Analysis task cancelled for job %s", job_id)
+        return
+    exc = task.exception()
+    if exc:
+        logger.error("Unhandled exception in analysis task for job %s: %s", job_id, exc, exc_info=exc)
+
+
 @app.get("/api/health")
 async def health():
     settings = get_settings()
@@ -88,8 +98,9 @@ async def upload_email(
 
     logger.info("Job created: %s for file %s (%.1f KB)", job_id, file.filename, size_kb)
 
-    # Launch background analysis
-    asyncio.create_task(run_analysis(job_id, file.filename, raw_bytes))
+    # Launch background analysis with exception logging
+    task = asyncio.create_task(run_analysis(job_id, file.filename, raw_bytes))
+    task.add_done_callback(lambda t: _log_task_exception(t, job_id))
 
     return job
 

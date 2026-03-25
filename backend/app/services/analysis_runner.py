@@ -384,15 +384,31 @@ async def run_analysis(job_id: str, filename: str, raw_bytes: bytes):
         logger.exception("Analysis pipeline failed for job %s", job_id)
         trace.emit("pipeline", "pipeline_exception", detail=str(e)[:300])
         try:
+            # Rollback any dirty session state before attempting error recovery
+            db.rollback()
             job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
             if job:
                 job.status = "failed"
-                job.error_message = str(e)
+                job.error_message = str(e)[:500]
                 job.pipeline_trace = trace.to_list()
                 job.pipeline_summary = trace.summary()
                 db.commit()
-        except Exception:
-            pass
+        except Exception as recovery_err:
+            logger.error("Error recovery failed for job %s: %s", job_id, recovery_err)
+            # Last resort: try a fresh session to set failed status
+            try:
+                db.rollback()
+                db2 = SessionLocal()
+                try:
+                    j = db2.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+                    if j:
+                        j.status = "failed"
+                        j.error_message = f"Pipeline failed: {str(e)[:200]} (recovery also failed: {str(recovery_err)[:100]})"
+                        db2.commit()
+                finally:
+                    db2.close()
+            except Exception:
+                logger.critical("Could not set failed status for job %s", job_id)
     finally:
         db.close()
 
