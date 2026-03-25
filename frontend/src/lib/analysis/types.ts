@@ -172,8 +172,8 @@ export type CriticalLink = {
 /**
  * Reputation coverage status derived from backend verdicts.
  *
- * - "clean": all links have belastbare provider results, none negative
- * - "partially_analyzed": some links verified, some not
+ * - "clean": all links fully verified by providers, none negative
+ * - "partially_analyzed": some links verified, some not (or only partial provider coverage)
  * - "unknown": no belastbare results despite links existing
  * - "not_checked": no providers were executed at all
  * - "none": no links in the email
@@ -184,12 +184,30 @@ export type LinkStats = {
   total: number;
   malicious: number;
   suspicious: number;
-  scansFailed: number;
-  scansCompleted: number;
   criticalLinks: CriticalLink[];
 
-  /** Number of links where at least one provider returned result_fetched=true */
-  resultFetchedCount: number;
+  // ─── Link-Level (each link counted once) ───────────────────────────
+  /** Links where ALL non-skipped providers returned result_fetched=true */
+  linksFullyAnalyzed: number;
+  /** Links where at least one (but not all) providers returned result_fetched=true */
+  linksPartiallyAnalyzed: number;
+  /** Links where no provider returned result_fetched=true */
+  linksWithoutResult: number;
+
+  // ─── Provider-Level (each provider check counted separately) ───────
+  /** Total individual provider scan attempts (e.g. 2 providers × 47 links = 94) */
+  providerScansTotal: number;
+  /** Provider scans that returned result_fetched=true */
+  providerScansSuccessful: number;
+  /** Provider scans that failed (timeout, rate_limited, api_error, etc.) */
+  providerScansFailed: number;
+  /** Provider scans that were skipped or not executed */
+  providerScansSkipped: number;
+
+  // ─── Derived ───────────────────────────────────────────────────────
+  /** Provider scan success rate as percentage (0–100), null if no scans attempted */
+  coveragePercent: number | null;
+
   /** Verdict counts from backend (link.verdict field) */
   verdicts: {
     clean: number;
@@ -201,6 +219,14 @@ export type LinkStats = {
   };
   /** Aggregated reputation coverage status */
   reputationCoverage: ReputationCoverage;
+
+  // ─── Legacy (kept for backward compat with existing signal logic) ──
+  /** @deprecated Use providerScansSuccessful */
+  scansCompleted: number;
+  /** @deprecated Use providerScansFailed */
+  scansFailed: number;
+  /** @deprecated Use linksFullyAnalyzed + linksPartiallyAnalyzed */
+  resultFetchedCount: number;
 };
 
 export type ScoreDriver = {

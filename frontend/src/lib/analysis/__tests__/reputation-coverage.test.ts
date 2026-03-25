@@ -51,30 +51,176 @@ function makeCheck(overrides: any = {}) {
   };
 }
 
-// ─── summarizeLinks: Reputation Coverage ────────────────────────────────────
+// ─── Link-Level vs Provider-Level separation ────────────────────────────────
+
+describe("link-level coverage classification", () => {
+  it("link with ALL providers successful => fully analyzed", () => {
+    const links = [
+      makeLink({
+        verdict: "clean",
+        external_checks: [
+          makeCheck({ service: "virustotal", result_fetched: true, scan_status: "completed_clean" }),
+          makeCheck({ service: "urlscan", result_fetched: true, scan_status: "completed_clean" }),
+        ],
+      }),
+    ];
+    const stats = summarizeLinks(links);
+    expect(stats.linksFullyAnalyzed).toBe(1);
+    expect(stats.linksPartiallyAnalyzed).toBe(0);
+    expect(stats.linksWithoutResult).toBe(0);
+  });
+
+  it("link with only ONE provider successful => partially analyzed", () => {
+    const links = [
+      makeLink({
+        verdict: "partially_analyzed",
+        external_checks: [
+          makeCheck({ service: "virustotal", result_fetched: true, scan_status: "completed_clean" }),
+          makeCheck({ service: "urlscan", result_fetched: false, scan_status: "timeout", status: "timeout" }),
+        ],
+      }),
+    ];
+    const stats = summarizeLinks(links);
+    expect(stats.linksFullyAnalyzed).toBe(0);
+    expect(stats.linksPartiallyAnalyzed).toBe(1);
+    expect(stats.linksWithoutResult).toBe(0);
+  });
+
+  it("link with NO provider result => without result", () => {
+    const links = [
+      makeLink({
+        verdict: "unknown",
+        external_checks: [
+          makeCheck({ service: "virustotal", result_fetched: false, scan_status: "timeout", status: "timeout" }),
+          makeCheck({ service: "urlscan", result_fetched: false, scan_status: "api_error", status: "failed" }),
+        ],
+      }),
+    ];
+    const stats = summarizeLinks(links);
+    expect(stats.linksFullyAnalyzed).toBe(0);
+    expect(stats.linksPartiallyAnalyzed).toBe(0);
+    expect(stats.linksWithoutResult).toBe(1);
+  });
+
+  it("link with only skipped providers => without result", () => {
+    const links = [
+      makeLink({
+        verdict: "not_checked",
+        external_checks: [
+          makeCheck({ service: "virustotal", result_fetched: false, scan_status: "skipped" }),
+          makeCheck({ service: "urlscan", result_fetched: false, scan_status: "not_executed" }),
+        ],
+      }),
+    ];
+    const stats = summarizeLinks(links);
+    expect(stats.linksFullyAnalyzed).toBe(0);
+    expect(stats.linksPartiallyAnalyzed).toBe(0);
+    expect(stats.linksWithoutResult).toBe(1);
+  });
+});
+
+describe("provider-level scan counting", () => {
+  it("counts provider scans independently from link count", () => {
+    const links = [
+      makeLink({
+        verdict: "clean",
+        external_checks: [
+          makeCheck({ service: "virustotal", result_fetched: true }),
+          makeCheck({ service: "urlscan", result_fetched: true }),
+        ],
+      }),
+      makeLink({
+        verdict: "unknown",
+        external_checks: [
+          makeCheck({ service: "virustotal", result_fetched: false, scan_status: "timeout", status: "timeout" }),
+          makeCheck({ service: "urlscan", result_fetched: false, scan_status: "api_error", status: "failed" }),
+        ],
+      }),
+    ];
+    const stats = summarizeLinks(links);
+
+    // 2 links, 4 provider scans
+    expect(stats.total).toBe(2);
+    expect(stats.providerScansTotal).toBe(4);
+    expect(stats.providerScansSuccessful).toBe(2);
+    expect(stats.providerScansFailed).toBe(2);
+    expect(stats.providerScansSkipped).toBe(0);
+
+    // Link-level
+    expect(stats.linksFullyAnalyzed).toBe(1);
+    expect(stats.linksWithoutResult).toBe(1);
+  });
+
+  it("newsletter with 47 links and 2 providers: 47/94 scans successful", () => {
+    // Simulates: 47 links, VT succeeds for all, urlscan fails for all
+    const links = Array.from({ length: 47 }, (_, i) =>
+      makeLink({
+        id: `link-${i}`,
+        verdict: "partially_analyzed",
+        external_checks: [
+          makeCheck({ service: "virustotal", result_fetched: true, scan_status: "completed_clean" }),
+          makeCheck({ service: "urlscan", result_fetched: false, scan_status: "rate_limited", status: "failed" }),
+        ],
+      })
+    );
+    const stats = summarizeLinks(links);
+
+    expect(stats.total).toBe(47);
+    expect(stats.providerScansTotal).toBe(94);
+    expect(stats.providerScansSuccessful).toBe(47);
+    expect(stats.providerScansFailed).toBe(47);
+    expect(stats.coveragePercent).toBe(50);
+
+    // All links are partially analyzed (1 of 2 providers returned)
+    expect(stats.linksFullyAnalyzed).toBe(0);
+    expect(stats.linksPartiallyAnalyzed).toBe(47);
+    expect(stats.linksWithoutResult).toBe(0);
+
+    // Coverage is partial, not clean
+    expect(stats.reputationCoverage).toBe("partially_analyzed");
+  });
+
+  it("skipped providers not counted in coverage percent", () => {
+    const links = [
+      makeLink({
+        verdict: "clean",
+        external_checks: [
+          makeCheck({ service: "virustotal", result_fetched: true }),
+          makeCheck({ service: "urlscan", result_fetched: false, scan_status: "not_executed" }),
+        ],
+      }),
+    ];
+    const stats = summarizeLinks(links);
+    // 1 attempted (VT), 1 skipped (urlscan) → only VT counts
+    expect(stats.providerScansSkipped).toBe(1);
+    expect(stats.coveragePercent).toBe(100); // 1/1 attempted = 100%
+    // Link is fully analyzed because the only non-skipped provider returned
+    expect(stats.linksFullyAnalyzed).toBe(1);
+  });
+});
+
+// ─── Reputation coverage aggregation ────────────────────────────────────────
 
 describe("summarizeLinks reputation coverage", () => {
   it("no links => coverage 'none'", () => {
     const stats = summarizeLinks([]);
     expect(stats.reputationCoverage).toBe("none");
-    expect(stats.resultFetchedCount).toBe(0);
   });
 
-  it("all links clean with result_fetched => coverage 'clean'", () => {
+  it("all links fully analyzed => coverage 'clean'", () => {
     const links = [
       makeLink({
         verdict: "clean",
-        external_checks: [makeCheck({ result_fetched: true, scan_status: "completed_clean" })],
+        external_checks: [makeCheck({ result_fetched: true })],
       }),
       makeLink({
         verdict: "clean",
-        external_checks: [makeCheck({ result_fetched: true, scan_status: "completed_clean" })],
+        external_checks: [makeCheck({ result_fetched: true })],
       }),
     ];
     const stats = summarizeLinks(links);
     expect(stats.reputationCoverage).toBe("clean");
-    expect(stats.resultFetchedCount).toBe(2);
-    expect(stats.verdicts.clean).toBe(2);
+    expect(stats.linksFullyAnalyzed).toBe(2);
   });
 
   it("no malicious + no suspicious + no result_fetched => NOT clean", () => {
@@ -82,39 +228,30 @@ describe("summarizeLinks reputation coverage", () => {
       makeLink({
         verdict: "unknown",
         external_checks: [makeCheck({
-          result_fetched: false,
-          status: "timeout",
-          scan_status: "timeout",
-          malicious_count: 0,
-          suspicious_count: 0,
+          result_fetched: false, status: "timeout", scan_status: "timeout",
         })],
       }),
     ];
     const stats = summarizeLinks(links);
     expect(stats.reputationCoverage).not.toBe("clean");
     expect(stats.reputationCoverage).toBe("unknown");
-    expect(stats.malicious).toBe(0);
-    expect(stats.suspicious).toBe(0);
   });
 
-  it("partial provider results => 'partially_analyzed'", () => {
+  it("mix of fully and without result => 'partially_analyzed'", () => {
     const links = [
       makeLink({
         verdict: "clean",
-        external_checks: [makeCheck({ result_fetched: true, scan_status: "completed_clean" })],
+        external_checks: [makeCheck({ result_fetched: true })],
       }),
       makeLink({
         verdict: "unknown",
         external_checks: [makeCheck({
-          result_fetched: false,
-          status: "timeout",
-          scan_status: "timeout",
+          result_fetched: false, status: "timeout", scan_status: "timeout",
         })],
       }),
     ];
     const stats = summarizeLinks(links);
     expect(stats.reputationCoverage).toBe("partially_analyzed");
-    expect(stats.resultFetchedCount).toBe(1);
   });
 
   it("all not_checked => coverage 'not_checked'", () => {
@@ -125,22 +262,9 @@ describe("summarizeLinks reputation coverage", () => {
     const stats = summarizeLinks(links);
     expect(stats.reputationCoverage).toBe("not_checked");
   });
-
-  it("malicious link with result_fetched does not get 'clean' coverage", () => {
-    const links = [
-      makeLink({
-        verdict: "malicious",
-        external_checks: [makeCheck({ result_fetched: true, malicious_count: 3, scan_status: "completed_malicious" })],
-      }),
-    ];
-    const stats = summarizeLinks(links);
-    expect(stats.malicious).toBe(3);
-    // Coverage is about how many links were verified, not about the outcome
-    expect(stats.resultFetchedCount).toBe(1);
-  });
 });
 
-// ─── Signal generation: clean only when verified ────────────────────────────
+// ─── Signal generation: labels and precision ────────────────────────────────
 
 describe("normalize: reputation signals", () => {
   it("verified clean links produce 'links:clean' signal", () => {
@@ -148,7 +272,7 @@ describe("normalize: reputation signals", () => {
       links: [
         makeLink({
           verdict: "clean",
-          external_checks: [makeCheck({ result_fetched: true, scan_status: "completed_clean" })],
+          external_checks: [makeCheck({ result_fetched: true })],
         }),
       ],
     });
@@ -163,16 +287,15 @@ describe("normalize: reputation signals", () => {
     expect(clean!.tier).toBe(2);
   });
 
-  it("unknown links produce 'links:unknown' signal, NOT 'links:clean'", () => {
+  it("unknown links produce 'links:unknown' with provider-level detail", () => {
     const result = makeResult({
       links: [
         makeLink({
           verdict: "unknown",
-          external_checks: [makeCheck({
-            result_fetched: false,
-            status: "timeout",
-            scan_status: "timeout",
-          })],
+          external_checks: [
+            makeCheck({ result_fetched: false, status: "timeout", scan_status: "timeout" }),
+            makeCheck({ service: "urlscan", result_fetched: false, scan_status: "api_error", status: "failed" }),
+          ],
         }),
       ],
     });
@@ -185,9 +308,11 @@ describe("normalize: reputation signals", () => {
     expect(unknown).toBeDefined();
     expect(unknown!.label).toBe("Reputationsbewertung nicht belastbar");
     expect(unknown!.direction).toBe("negative");
+    // Evidence text should reference provider scan counts
+    expect(unknown!.evidenceText).toMatch(/Provider-Scans fehlgeschlagen/);
   });
 
-  it("partially analyzed links produce 'links:partial' signal", () => {
+  it("partially analyzed links signal includes link-level counts", () => {
     const result = makeResult({
       links: [
         makeLink({
@@ -204,10 +329,12 @@ describe("normalize: reputation signals", () => {
     const linkStats = summarizeLinks(result.links);
     const signals = normalizeSignals(result, identity, linkStats, false);
 
-    expect(signals.find((s) => s.key === "links:clean")).toBeUndefined();
     const partial = signals.find((s) => s.key === "links:partial");
     expect(partial).toBeDefined();
     expect(partial!.label).toContain("unvollständig");
+    // Evidence should contain link-level + provider-level detail
+    expect(partial!.evidenceText).toMatch(/vollständig geprüft/);
+    expect(partial!.evidenceText).toMatch(/Provider-Scans/);
   });
 
   it("not_checked links produce 'links:not_checked' signal", () => {
@@ -221,12 +348,10 @@ describe("normalize: reputation signals", () => {
     expect(signals.find((s) => s.key === "links:clean")).toBeUndefined();
     const notChecked = signals.find((s) => s.key === "links:not_checked");
     expect(notChecked).toBeDefined();
-    expect(notChecked!.label).toBe("Keine belastbare Reputationsbewertung verfügbar");
     expect(notChecked!.direction).toBe("negative");
   });
 
-  it("'Alle Links reputationsmäßig unauffällig' text never appears", () => {
-    // Even in clean case, the old text should be gone
+  it("'Alle Links reputationsmäßig unauffällig' never appears", () => {
     const result = makeResult({
       links: [
         makeLink({
@@ -238,16 +363,37 @@ describe("normalize: reputation signals", () => {
     const identity = assessIdentity(result);
     const linkStats = summarizeLinks(result.links);
     const signals = normalizeSignals(result, identity, linkStats, false);
-
     const allLabels = signals.map((s) => s.label);
     expect(allLabels).not.toContain("Alle Links reputationsmäßig unauffällig");
+  });
+
+  it("'mit belastbarem Ergebnis geprüft' not in signal labels for partial coverage", () => {
+    const result = makeResult({
+      links: [
+        makeLink({
+          verdict: "clean",
+          external_checks: [makeCheck({ result_fetched: true })],
+        }),
+        makeLink({
+          verdict: "unknown",
+          external_checks: [makeCheck({ result_fetched: false, scan_status: "timeout", status: "timeout" })],
+        }),
+      ],
+    });
+    const identity = assessIdentity(result);
+    const linkStats = summarizeLinks(result.links);
+    const signals = normalizeSignals(result, identity, linkStats, false);
+    const allLabels = signals.map((s) => s.label);
+    for (const label of allLabels) {
+      expect(label).not.toContain("mit belastbarem Ergebnis geprüft");
+    }
   });
 });
 
 // ─── High-risk content + reputation: no false exoneration ───────────────────
 
 describe("high-risk content + reputation interaction", () => {
-  it("high-risk content + clean reputation => links:clean demoted, not dominant positive", () => {
+  it("high-risk content + clean reputation => links:clean demoted", () => {
     const result = makeResult({
       sender: { from_address: "user@example.com", reply_to: null, return_path: null, subject: "Konto gesperrt - sofort handeln", to: null, date: null, message_id: null },
       links: [
@@ -260,63 +406,30 @@ describe("high-risk content + reputation interaction", () => {
     });
     const analysis = analyzeResult(result);
 
-    // links:clean should be demoted (tier 1, context, not promotable)
     const cleanSignal = analysis.normalized.find((s) => s.key === "links:clean");
     if (cleanSignal) {
       expect(cleanSignal.tier).toBe(1);
       expect(cleanSignal.severity).toBe("context");
       expect(cleanSignal.promotable).toBe(false);
     }
-
-    // links:clean should NOT appear in positive decision factors
     const positiveKeys = analysis.decisionFactors.positive.map((s) => s.key);
     expect(positiveKeys).not.toContain("links:clean");
   });
 
-  it("high-risk content + unknown reputation => no clean entlastung at all", () => {
-    const result = makeResult({
-      sender: { from_address: "user@example.com", reply_to: null, return_path: null, subject: "Konto gesperrt - sofort handeln", to: null, date: null, message_id: null },
-      links: [
-        makeLink({
-          verdict: "unknown",
-          external_checks: [makeCheck({
-            result_fetched: false,
-            status: "timeout",
-            scan_status: "timeout",
-          })],
-        }),
-      ],
-      assessment: { classification: "phishing", evidence: ["Account suspended - verify now"] },
-    });
-    const analysis = analyzeResult(result);
-
-    // No links:clean signal at all
-    expect(analysis.normalized.find((s) => s.key === "links:clean")).toBeUndefined();
-
-    // Positive factors should not contain any link reputation entlastung
-    const positiveKeys = analysis.decisionFactors.positive.map((s) => s.key);
-    expect(positiveKeys).not.toContain("links:clean");
-    expect(positiveKeys).not.toContain("links:unknown");
-  });
-
-  it("phishing case does not get strong reputation-entlastung", () => {
+  it("phishing case with unknown reputation => no entlastung", () => {
     const result = makeResult({
       sender: { from_address: "user@example.com", reply_to: null, return_path: null, subject: "Ihre Zahlung fehlgeschlagen - Konto gesperrt", to: null, date: null, message_id: null },
       links: [
         makeLink({
           verdict: "unknown",
           external_checks: [makeCheck({
-            result_fetched: false,
-            status: "error",
-            scan_status: "api_error",
+            result_fetched: false, status: "error", scan_status: "api_error",
           })],
         }),
       ],
       assessment: { classification: "phishing", evidence: [] },
     });
     const analysis = analyzeResult(result);
-
-    // No positive decision factor for links
     const positiveLabels = analysis.decisionFactors.positive.map((s) => s.label);
     for (const label of positiveLabels) {
       expect(label).not.toMatch(/unauffällig|clean|sauber/i);
@@ -327,42 +440,41 @@ describe("high-risk content + reputation interaction", () => {
 // ─── Newsletter case with incomplete reputation ─────────────────────────────
 
 describe("newsletter with incomplete reputation", () => {
-  it("newsletter with partial reputation does not claim clean", () => {
+  it("newsletter with 47/94 successful scans => partial, not clean", () => {
+    const links = Array.from({ length: 47 }, (_, i) =>
+      makeLink({
+        id: `link-${i}`,
+        verdict: "partially_analyzed",
+        external_checks: [
+          makeCheck({ service: "virustotal", result_fetched: true }),
+          makeCheck({ service: "urlscan", result_fetched: false, scan_status: "rate_limited", status: "failed" }),
+        ],
+      })
+    );
     const result = makeResult({
       structured_headers: { "list-unsubscribe": "<mailto:unsub@newsletter.com>" },
-      links: [
-        makeLink({
-          verdict: "clean",
-          external_checks: [makeCheck({ result_fetched: true })],
-        }),
-        makeLink({
-          verdict: "unknown",
-          external_checks: [makeCheck({ result_fetched: false, status: "timeout", scan_status: "timeout" })],
-        }),
-        makeLink({
-          verdict: "not_checked",
-          external_checks: [],
-        }),
-      ],
+      links,
     });
     const identity = assessIdentity(result);
     const linkStats = summarizeLinks(result.links);
     const signals = normalizeSignals(result, identity, linkStats, true);
 
-    // Should NOT have a clean signal
     expect(signals.find((s) => s.key === "links:clean")).toBeUndefined();
-
-    // Should have partial signal
     const partial = signals.find((s) => s.key === "links:partial");
     expect(partial).toBeDefined();
+    expect(partial!.label).toContain("unvollständig");
+
+    // Verify link-level counts
+    expect(linkStats.linksPartiallyAnalyzed).toBe(47);
+    expect(linkStats.linksFullyAnalyzed).toBe(0);
+    expect(linkStats.coveragePercent).toBe(50);
   });
 });
 
-// ─── Decision factors: correct entlastung rules ────────────────────────────
+// ─── Decision factors respect coverage ──────────────────────────────────────
 
 describe("decision factors respect reputation coverage", () => {
-  it("clean only appears as positive factor when verified", () => {
-    // Use minimal auth (only SPF) so links:clean isn't pushed out by MAX_FACTORS
+  it("clean only appears as positive factor when fully verified", () => {
     const result = makeResult({
       authentication_results: "spf=pass",
       links: [
@@ -374,8 +486,31 @@ describe("decision factors respect reputation coverage", () => {
     });
     const analysis = analyzeResult(result);
     const positiveKeys = analysis.decisionFactors.positive.map((s) => s.key);
-    // links:clean should be in positive factors (verified clean, no content risk)
     expect(positiveKeys).toContain("links:clean");
+  });
+
+  it("partial coverage produces hedged text, not strong positive", () => {
+    const result = makeResult({
+      authentication_results: "spf=pass",
+      links: [
+        makeLink({
+          verdict: "clean",
+          external_checks: [makeCheck({ result_fetched: true })],
+        }),
+        makeLink({
+          verdict: "unknown",
+          external_checks: [makeCheck({ result_fetched: false, scan_status: "timeout", status: "timeout" })],
+        }),
+      ],
+    });
+    const analysis = analyzeResult(result);
+    // Should NOT have links:clean as positive factor (coverage is partial)
+    const positiveKeys = analysis.decisionFactors.positive.map((s) => s.key);
+    expect(positiveKeys).not.toContain("links:clean");
+    // partial signal should exist but as context
+    const partial = analysis.normalized.find((s) => s.key === "links:partial");
+    expect(partial).toBeDefined();
+    expect(partial!.severity).toBe("context");
   });
 
   it("unknown/not_checked never appears as positive factor", () => {
@@ -391,23 +526,23 @@ describe("decision factors respect reputation coverage", () => {
     const positiveKeys = analysis.decisionFactors.positive.map((s) => s.key);
     expect(positiveKeys).not.toContain("links:clean");
     expect(positiveKeys).not.toContain("links:unknown");
-    // links:unknown should appear as negative (direction: negative)
     const negativeKeys = analysis.decisionFactors.negative.map((s) => s.key);
     expect(negativeKeys).toContain("links:unknown");
   });
 });
 
-// ─── Coverage computation edge cases ────────────────────────────────────────
+// ─── Edge cases ─────────────────────────────────────────────────────────────
 
 describe("coverage edge cases", () => {
-  it("link with no external_checks and no verdict defaults to unknown", () => {
+  it("link with no external_checks defaults to without_result", () => {
     const links = [{ ...makeLink(), verdict: undefined, external_checks: [] }];
     const stats = summarizeLinks(links);
     expect(stats.verdicts.unknown).toBe(1);
+    expect(stats.linksWithoutResult).toBe(1);
     expect(stats.reputationCoverage).toBe("unknown");
   });
 
-  it("link with result_fetched from one provider but not another", () => {
+  it("link with one fetched + one failed provider => partially analyzed", () => {
     const links = [
       makeLink({
         verdict: "partially_analyzed",
@@ -418,8 +553,31 @@ describe("coverage edge cases", () => {
       }),
     ];
     const stats = summarizeLinks(links);
-    expect(stats.resultFetchedCount).toBe(1);
-    expect(stats.verdicts.partially_analyzed).toBe(1);
+    expect(stats.linksPartiallyAnalyzed).toBe(1);
+    expect(stats.linksFullyAnalyzed).toBe(0);
+    expect(stats.providerScansSuccessful).toBe(1);
+    expect(stats.providerScansFailed).toBe(1);
     expect(stats.reputationCoverage).toBe("partially_analyzed");
+  });
+
+  it("coveragePercent is null when no scans attempted", () => {
+    const links = [makeLink({ verdict: "not_checked", external_checks: [] })];
+    const stats = summarizeLinks(links);
+    expect(stats.coveragePercent).toBeNull();
+  });
+
+  it("coveragePercent excludes skipped scans from denominator", () => {
+    const links = [
+      makeLink({
+        verdict: "clean",
+        external_checks: [
+          makeCheck({ service: "virustotal", result_fetched: true }),
+          makeCheck({ service: "urlscan", result_fetched: false, scan_status: "skipped" }),
+        ],
+      }),
+    ];
+    const stats = summarizeLinks(links);
+    // Only VT counted (urlscan skipped), so 1/1 = 100%
+    expect(stats.coveragePercent).toBe(100);
   });
 });

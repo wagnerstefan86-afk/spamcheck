@@ -125,11 +125,11 @@ export function generateDecisionExplanation(
   if (linksNotChecked) {
     parts.push("Reputationsprüfung wurde nicht ausgeführt — keine Entwarnung möglich.");
   } else if (linksUnknown) {
-    parts.push("Reputationsbewertung nicht belastbar — kein verwertbares Ergebnis erhalten.");
+    parts.push("Reputationsbewertung nicht belastbar — kein verwertbares Provider-Ergebnis erhalten.");
   } else if (reputationUnknown) {
-    parts.push("Reputations-Scans konnten nicht vollständig durchgeführt werden — Ergebnis nicht belastbar.");
+    parts.push("Provider-Scans konnten nicht vollständig durchgeführt werden — Reputationsbewertung nicht belastbar.");
   } else if (linksPartial) {
-    parts.push("Reputationsbewertung nur für einen Teil der Links verfügbar.");
+    parts.push("Auf Basis der verfügbaren Reputationsergebnisse keine negativen Treffer — Bewertung jedoch unvollständig.");
   }
 
   // Link summary from signals

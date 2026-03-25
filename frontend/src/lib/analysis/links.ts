@@ -1,8 +1,10 @@
 /**
  * Link analysis and summarization.
  *
- * Uses backend-provided verdict, scan_status, and result_fetched fields
- * to derive accurate reputation coverage instead of inferring from counts.
+ * Separates link-level and provider-level metrics for audit-ready display.
+ *
+ * Link-level: each link counted once (fully/partially/without result)
+ * Provider-level: each provider scan attempt counted separately
  */
 
 import type { LinkStats, CriticalLink, ReputationCoverage } from "./types";
@@ -16,45 +18,72 @@ const LINK_REASON_LABELS: Record<string, string> = {
   suspicious: "Von Reputationsdienst als verdächtig eingestuft",
 };
 
+/** Terminal failure statuses from the backend ScanStatus enum */
+const FAILURE_STATUSES = new Set([
+  "rate_limited", "timeout", "api_error", "submit_failed", "invalid_response",
+]);
+
+/** Statuses that mean the provider was never attempted */
+const SKIPPED_STATUSES = new Set([
+  "skipped", "not_executed",
+]);
+
 /**
- * Computes the overall reputation coverage from per-link verdicts.
+ * Classify a single link's provider coverage.
+ *
+ * - "fully_analyzed": all non-skipped providers returned result_fetched=true
+ * - "partially_analyzed": at least one returned result_fetched, but not all non-skipped
+ * - "without_result": no provider returned result_fetched=true
+ */
+function classifyLinkCoverage(
+  checks: any[],
+): "fully_analyzed" | "partially_analyzed" | "without_result" {
+  if (checks.length === 0) return "without_result";
+
+  let nonSkippedCount = 0;
+  let fetchedCount = 0;
+
+  for (const check of checks) {
+    const scanStatus = check.scan_status || "";
+    if (SKIPPED_STATUSES.has(scanStatus)) continue;
+    nonSkippedCount++;
+    if (check.result_fetched) fetchedCount++;
+  }
+
+  if (nonSkippedCount === 0) return "without_result";
+  if (fetchedCount >= nonSkippedCount) return "fully_analyzed";
+  if (fetchedCount > 0) return "partially_analyzed";
+  return "without_result";
+}
+
+/**
+ * Compute aggregated reputation coverage from link-level metrics.
  *
  * Rules (conservative):
- * - If ANY link is malicious → coverage is irrelevant (malicious dominates)
- * - If ALL links have verdict "clean" and resultFetchedCount > 0 → "clean"
- * - If some links clean, some unknown/partial → "partially_analyzed"
- * - If all links are "not_checked" → "not_checked"
- * - Otherwise → "unknown"
+ * - All links fully analyzed, none negative → "clean"
+ * - Some links have results but not all fully → "partially_analyzed"
+ * - All links not_checked → "not_checked"
+ * - No usable results at all → "unknown"
  */
 function computeReputationCoverage(
   total: number,
+  linksFullyAnalyzed: number,
+  linksPartiallyAnalyzed: number,
   verdicts: LinkStats["verdicts"],
-  resultFetchedCount: number,
 ): ReputationCoverage {
   if (total === 0) return "none";
 
-  // Malicious/suspicious links — coverage doesn't matter, threat is confirmed
-  if (verdicts.malicious > 0 || verdicts.suspicious > 0) {
-    // Still return the actual coverage for display purposes
-    if (resultFetchedCount > 0 && resultFetchedCount >= total) return "clean";
-    if (resultFetchedCount > 0) return "partially_analyzed";
-    return "unknown";
-  }
-
-  // All not_checked → providers were never executed
+  // All not_checked → no providers executed
   if (verdicts.not_checked === total) return "not_checked";
 
-  // Hard rule: no result_fetched at all → never clean
-  if (resultFetchedCount === 0) return "unknown";
+  // No link has any provider result
+  if (linksFullyAnalyzed === 0 && linksPartiallyAnalyzed === 0) return "unknown";
 
-  // All links have clean verdict and at least one result was fetched
-  if (verdicts.clean === total && resultFetchedCount > 0) return "clean";
+  // All links fully analyzed by all providers
+  if (linksFullyAnalyzed === total) return "clean";
 
-  // Some clean, some not → partially analyzed
-  if (verdicts.clean > 0 && verdicts.clean < total) return "partially_analyzed";
-
-  // Mix of unknown/partial/not_checked
-  if (verdicts.partially_analyzed > 0) return "partially_analyzed";
+  // Some links have results, but not all are fully covered
+  if (linksFullyAnalyzed > 0 || linksPartiallyAnalyzed > 0) return "partially_analyzed";
 
   return "unknown";
 }
@@ -62,9 +91,23 @@ function computeReputationCoverage(
 export function summarizeLinks(links: any[]): LinkStats {
   let malicious = 0;
   let suspicious = 0;
-  let scansFailed = 0;
+
+  // Provider-level counters
+  let providerScansTotal = 0;
+  let providerScansSuccessful = 0;
+  let providerScansFailed = 0;
+  let providerScansSkipped = 0;
+
+  // Link-level counters
+  let linksFullyAnalyzed = 0;
+  let linksPartiallyAnalyzed = 0;
+  let linksWithoutResult = 0;
+
+  // Legacy counters (kept for signal logic compat)
   let scansCompleted = 0;
+  let scansFailed = 0;
   let resultFetchedCount = 0;
+
   const criticalLinks: CriticalLink[] = [];
 
   const verdicts = {
@@ -92,17 +135,32 @@ export function summarizeLinks(links: any[]): LinkStats {
       verdicts.unknown++;
     }
 
-    // Track whether any provider actually returned a result for this link
-    let linkHasResult = false;
+    const checks: any[] = link.external_checks || [];
 
-    for (const check of link.external_checks || []) {
-      // Use result_fetched (new backend field) as primary indicator
-      if (check.result_fetched) {
-        linkHasResult = true;
+    // Provider-level: count each individual scan
+    for (const check of checks) {
+      providerScansTotal++;
+      const scanStatus = check.scan_status || "";
+
+      if (SKIPPED_STATUSES.has(scanStatus)) {
+        providerScansSkipped++;
+      } else if (check.result_fetched) {
+        providerScansSuccessful++;
+        // Legacy compat
+        scansCompleted++;
+      } else if (FAILURE_STATUSES.has(scanStatus)
+        || check.status === "error" || check.status === "timeout" || check.status === "failed") {
+        providerScansFailed++;
+        // Legacy compat
+        scansFailed++;
+      } else if (check.status === "completed") {
+        // Legacy completed without result_fetched — count as successful
+        providerScansSuccessful++;
+        scansCompleted++;
       }
 
-      if (check.status === "completed" || check.result_fetched) {
-        scansCompleted++;
+      // Count malicious/suspicious from successful checks
+      if (check.result_fetched || check.status === "completed") {
         if (check.malicious_count > 0) {
           malicious += check.malicious_count;
           reasons.push(`${LINK_REASON_LABELS.malicious} (${check.service}: ${check.malicious_count})`);
@@ -111,15 +169,19 @@ export function summarizeLinks(links: any[]): LinkStats {
           suspicious += check.suspicious_count;
           reasons.push(`${LINK_REASON_LABELS.suspicious} (${check.service}: ${check.suspicious_count})`);
         }
-      } else if (check.status === "error" || check.status === "timeout" || check.status === "failed"
-        || check.scan_status === "rate_limited" || check.scan_status === "timeout"
-        || check.scan_status === "api_error" || check.scan_status === "submit_failed") {
-        scansFailed++;
       }
     }
 
-    if (linkHasResult) {
+    // Link-level: classify this link's coverage
+    const linkCoverage = classifyLinkCoverage(checks);
+    if (linkCoverage === "fully_analyzed") {
+      linksFullyAnalyzed++;
       resultFetchedCount++;
+    } else if (linkCoverage === "partially_analyzed") {
+      linksPartiallyAnalyzed++;
+      resultFetchedCount++;
+    } else {
+      linksWithoutResult++;
     }
 
     if (reasons.length > 0) {
@@ -127,17 +189,41 @@ export function summarizeLinks(links: any[]): LinkStats {
     }
   }
 
-  const reputationCoverage = computeReputationCoverage(links.length, verdicts, resultFetchedCount);
+  const reputationCoverage = computeReputationCoverage(
+    links.length, linksFullyAnalyzed, linksPartiallyAnalyzed, verdicts
+  );
+
+  // Provider coverage percentage (excluding skipped)
+  const attemptedScans = providerScansTotal - providerScansSkipped;
+  const coveragePercent = attemptedScans > 0
+    ? Math.round((providerScansSuccessful / attemptedScans) * 100)
+    : null;
 
   return {
     total: links.length,
     malicious,
     suspicious,
-    scansFailed,
-    scansCompleted,
     criticalLinks,
-    resultFetchedCount,
+
+    // Link-level
+    linksFullyAnalyzed,
+    linksPartiallyAnalyzed,
+    linksWithoutResult,
+
+    // Provider-level
+    providerScansTotal,
+    providerScansSuccessful,
+    providerScansFailed,
+    providerScansSkipped,
+
+    // Derived
+    coveragePercent,
     verdicts,
     reputationCoverage,
+
+    // Legacy
+    scansCompleted,
+    scansFailed,
+    resultFetchedCount,
   };
 }

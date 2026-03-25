@@ -171,7 +171,8 @@ describe("Improved source references", () => {
     const { normalized } = analyzeResult(result);
     const clean = normalized.find((s) => s.key === "links:clean");
     expect(clean).toBeDefined();
-    expect(clean!.sourceRef).toBe("verified:1,total:1");
+    expect(clean!.sourceRef).toContain("fully:1");
+    expect(clean!.sourceRef).toContain("total:1");
   });
 });
 

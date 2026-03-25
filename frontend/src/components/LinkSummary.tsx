@@ -8,10 +8,10 @@ type Props = {
   stats: LinkStats;
 };
 
-/** Human-readable labels for reputation coverage status */
+/** Reputation coverage badge labels */
 const COVERAGE_LABELS: Record<ReputationCoverage, string> = {
   clean: "Keine negativen Reputationstreffer erkannt",
-  partially_analyzed: "Keine negativen Treffer erkannt, Bewertung jedoch unvollständig",
+  partially_analyzed: "Keine negativen Treffer in verfügbaren Ergebnissen — Bewertung unvollständig",
   unknown: "Reputationsbewertung nicht belastbar",
   not_checked: "Keine belastbare Reputationsbewertung verfügbar",
   none: "",
@@ -34,12 +34,13 @@ export default function LinkSummary({ links, stats }: Props) {
   const nonCriticalCount = links.length - stats.criticalLinks.length;
   const cov = stats.reputationCoverage;
   const covStyle = COVERAGE_STYLE[cov];
+  const attemptedScans = stats.providerScansTotal - stats.providerScansSkipped;
 
   return (
     <div className="card">
       <p className="text-xs text-text-secondary uppercase tracking-wider font-semibold mb-3">Link-Analyse</p>
 
-      {/* Compact summary bar */}
+      {/* Link-level summary */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
         <span className="font-medium text-text-primary">{stats.total} Links erkannt</span>
         {stats.malicious > 0 && (
@@ -54,32 +55,49 @@ export default function LinkSummary({ links, stats }: Props) {
             <span className="text-amber-600 font-semibold">{stats.suspicious} verdächtig</span>
           </>
         )}
-        <span className="text-text-tertiary">&middot;</span>
-        <span className="text-text-secondary">
-          {stats.resultFetchedCount} mit belastbarem Ergebnis geprüft
-        </span>
-        {stats.scansFailed > 0 && (
-          <>
-            <span className="text-text-tertiary">&middot;</span>
-            <span className="text-text-tertiary">{stats.scansFailed} Scans fehlgeschlagen</span>
-          </>
-        )}
       </div>
 
-      {/* Reputation coverage status badge */}
+      {/* Link-level & provider-level breakdown */}
       {cov !== "none" && (
-        <div className={`mt-3 px-3 py-2 rounded-lg border ${covStyle.bg} ${covStyle.border}`}>
+        <div className={`mt-3 px-3 py-2.5 rounded-lg border ${covStyle.bg} ${covStyle.border}`}>
           <p className={`text-xs font-medium ${covStyle.text}`}>
             {COVERAGE_LABELS[cov]}
           </p>
-          {(cov === "partially_analyzed" || cov === "unknown" || cov === "not_checked") && (
-            <p className="text-[11px] text-text-tertiary mt-0.5">
-              {stats.resultFetchedCount} von {stats.total} Links mit belastbarem Provider-Ergebnis
-              {stats.total - stats.resultFetchedCount > 0 && (
-                <> &middot; {stats.total - stats.resultFetchedCount} ohne belastbares Ergebnis</>
+
+          {/* Link-level detail */}
+          <div className="mt-1.5 space-y-0.5">
+            <p className="text-[11px] text-text-secondary">
+              <span className="font-medium">Links:</span>{" "}
+              {stats.linksFullyAnalyzed > 0 && (
+                <>{stats.linksFullyAnalyzed} vollständig geprüft</>
+              )}
+              {stats.linksFullyAnalyzed > 0 && stats.linksPartiallyAnalyzed > 0 && " · "}
+              {stats.linksPartiallyAnalyzed > 0 && (
+                <>{stats.linksPartiallyAnalyzed} teilweise geprüft</>
+              )}
+              {(stats.linksFullyAnalyzed > 0 || stats.linksPartiallyAnalyzed > 0) && stats.linksWithoutResult > 0 && " · "}
+              {stats.linksWithoutResult > 0 && (
+                <span className="text-text-tertiary">{stats.linksWithoutResult} ohne belastbares Ergebnis</span>
+              )}
+              {stats.linksFullyAnalyzed === 0 && stats.linksPartiallyAnalyzed === 0 && stats.linksWithoutResult === 0 && (
+                <span className="text-text-tertiary">keine Ergebnisse</span>
               )}
             </p>
-          )}
+
+            {/* Provider-level detail */}
+            {attemptedScans > 0 && (
+              <p className="text-[11px] text-text-tertiary">
+                <span className="font-medium text-text-secondary">Provider-Scans:</span>{" "}
+                {stats.providerScansSuccessful} von {attemptedScans} erfolgreich
+                {stats.providerScansFailed > 0 && (
+                  <> · {stats.providerScansFailed} fehlgeschlagen</>
+                )}
+                {stats.coveragePercent !== null && (
+                  <> · Coverage {stats.coveragePercent}%</>
+                )}
+              </p>
+            )}
+          </div>
         </div>
       )}
 
@@ -139,7 +157,6 @@ export default function LinkSummary({ links, stats }: Props) {
                 if (link.is_safelink) tags.push("SafeLink");
                 if (link.is_shortener) tags.push("Shortener");
 
-                // Show per-link verdict if available
                 const verdict = link.verdict;
                 if (verdict === "unknown" || verdict === "not_checked") tags.push("Nicht geprüft");
                 else if (verdict === "partially_analyzed") tags.push("Teilweise geprüft");

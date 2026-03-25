@@ -323,30 +323,32 @@ export function normalizeSignals(
     }));
   }
 
-  // Reputation coverage signals — derived from backend verdicts, not from absence of negatives
+  // Reputation coverage signals — derived from link-level coverage, not from absence of negatives
   if (linkStats.total > 0 && linkStats.malicious === 0 && linkStats.criticalLinks.length === 0) {
     const cov = linkStats.reputationCoverage;
+    const covRef = `fully:${linkStats.linksFullyAnalyzed},partial:${linkStats.linksPartiallyAnalyzed},without:${linkStats.linksWithoutResult},total:${linkStats.total}`;
+    const provRef = `scans:${linkStats.providerScansSuccessful}/${linkStats.providerScansTotal - linkStats.providerScansSkipped}`;
 
     if (cov === "clean") {
-      // Truly verified clean: at least one provider confirmed clean for every link
+      // All links fully verified by all providers, none negative
       signals.push(makeSignal({
         key: "links:clean",
         label: "Keine negativen Reputationstreffer erkannt",
         severity: "positive", tier: 2, domain: "links", category: "link_reputation",
         sourceType: "link_analysis",
-        sourceRef: `verified:${linkStats.resultFetchedCount},total:${linkStats.total}`,
+        sourceRef: `${covRef},${provRef}`,
         evidenceText: null,
         promotable: true, downgradeEligible: false,
       }));
     } else if (cov === "partially_analyzed") {
-      // Some verified, some not — no strong positive claim
+      // Partial coverage — hedged language, no strong positive claim
       signals.push(makeSignal({
         key: "links:partial",
-        label: "Keine negativen Treffer erkannt, Bewertung jedoch unvollständig",
+        label: "Keine negativen Treffer in verfügbaren Ergebnissen — Bewertung unvollständig",
         severity: "context", tier: 1, domain: "links", category: "reputation_coverage",
         sourceType: "link_analysis",
-        sourceRef: `verified:${linkStats.resultFetchedCount},total:${linkStats.total}`,
-        evidenceText: `${linkStats.resultFetchedCount} von ${linkStats.total} Links mit belastbarem Ergebnis geprüft.`,
+        sourceRef: `${covRef},${provRef}`,
+        evidenceText: `${linkStats.linksFullyAnalyzed} von ${linkStats.total} Links vollständig geprüft, ${linkStats.linksPartiallyAnalyzed} teilweise. Provider-Scans: ${linkStats.providerScansSuccessful} von ${linkStats.providerScansTotal - linkStats.providerScansSkipped} erfolgreich.`,
         promotable: true, downgradeEligible: false,
         direction: "positive",
       }));
@@ -357,20 +359,20 @@ export function normalizeSignals(
         label: "Keine belastbare Reputationsbewertung verfügbar",
         severity: "noteworthy", tier: 3, domain: "links", category: "reputation_coverage",
         sourceType: "link_analysis",
-        sourceRef: `total:${linkStats.total},checked:0`,
+        sourceRef: `${covRef}`,
         evidenceText: "Reputationsprüfung wurde nicht ausgeführt. Keine Entwarnung möglich.",
         promotable: true, downgradeEligible: false,
         direction: "negative",
       }));
     } else {
-      // unknown — providers ran but returned no usable results
+      // unknown — providers attempted but no usable results
       signals.push(makeSignal({
         key: "links:unknown",
         label: "Reputationsbewertung nicht belastbar",
         severity: "noteworthy", tier: 3, domain: "links", category: "reputation_coverage",
         sourceType: "link_analysis",
-        sourceRef: `verified:${linkStats.resultFetchedCount},total:${linkStats.total}`,
-        evidenceText: "Kein belastbares Ergebnis von Reputationsdiensten erhalten. Keine Entwarnung möglich.",
+        sourceRef: `${covRef},${provRef}`,
+        evidenceText: `Kein belastbares Ergebnis von Reputationsdiensten erhalten (${linkStats.providerScansFailed} von ${linkStats.providerScansTotal - linkStats.providerScansSkipped} Provider-Scans fehlgeschlagen). Keine Entwarnung möglich.`,
         promotable: true, downgradeEligible: false,
         direction: "negative",
       }));
