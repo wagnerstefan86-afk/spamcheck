@@ -49,7 +49,7 @@ export default function ResultView({ result, onDownload }: Props) {
       </div>
 
       {/* ── 1. DECISION ──────────────────────────────────────── */}
-      <DecisionHeader assessment={a} />
+      <DecisionHeader assessment={a} actionDecision={analysis.actionDecision} />
 
       {/* ── 2. RATIONALE (compact, one block) ────────────────── */}
       {a && (a.analyst_summary || analysis.explanation || a.rationale) && (

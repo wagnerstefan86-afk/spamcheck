@@ -245,6 +245,22 @@ export type ConflictAssessment = {
   bulkDowngradeBlockReason: string | null;
 };
 
+// ─── Action Decision — operative Handlungsempfehlung ─────────────────────
+
+/** Operative action decision for the end user */
+export type ActionLevel = "open" | "manual_review" | "do_not_open";
+
+export type ActionDecision = {
+  /** Internal action ID */
+  action: ActionLevel;
+  /** User-facing label (German) */
+  label: string;
+  /** Short explanation for the user */
+  reason: string;
+  /** Key signal that drove this decision (for audit) */
+  primaryDriver: string | null;
+};
+
 // ─── AnalysisResult — the complete internal analysis ────────────────────────
 
 /** Complete analysis result. Produced by analyzeResult(), consumed by UI. */
@@ -267,6 +283,8 @@ export type AnalysisResult = {
   contentRiskLevel: "none" | "low" | "high";
   /** Whether a decision override was applied (phishing content overrides "allow") */
   overrideApplied: boolean;
+  /** Operative action decision for the end user */
+  actionDecision: ActionDecision;
   /** Serializable summary — ready for export/API */
   summary: AnalysisSummary;
 };
@@ -346,4 +364,12 @@ export type AnalysisSummary = {
 
   /** Whether a decision override was applied due to content risk */
   overrideApplied: boolean;
+
+  /** Operative action decision */
+  actionDecision: {
+    action: ActionLevel;
+    label: string;
+    reason: string;
+    primaryDriver: string | null;
+  };
 };

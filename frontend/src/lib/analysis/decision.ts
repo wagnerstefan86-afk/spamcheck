@@ -12,6 +12,8 @@ import type {
   NormalizedSignal,
   AnalysisSummary,
   AnalysisResult,
+  ActionDecision,
+  ActionLevel,
 } from "./types";
 import { assessIdentity } from "./identity";
 import { summarizeLinks } from "./links";
@@ -159,6 +161,152 @@ export function generateDecisionExplanation(
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
+// ─── Action Decision Engine V1 ───────────────────────────────────────────────
+
+/**
+ * Deterministic action decision for end users.
+ *
+ * Three levels:
+ * - "open": safe to open, no significant risk
+ * - "manual_review": unclear, user should be cautious or escalate
+ * - "do_not_open": strong risk indicators, do not interact
+ *
+ * Rules are ordered: hard blocks first, then open eligibility, then fallback.
+ */
+export function computeActionDecision(
+  contentRiskLevel: "none" | "low" | "high",
+  signals: PrioritizedSignal[],
+  normalized: NormalizedSignal[],
+  identity: IdentityAssessment,
+  linkStats: LinkStats,
+  conflict: ConflictAssessment,
+  classification: string | null,
+): ActionDecision {
+
+  // ─── Hard "do_not_open" rules ──────────────────────────────────────
+
+  // 1. High content risk (credential lure, account threat, etc.)
+  if (contentRiskLevel === "high") {
+    const contentSignal = signals.find((s) => s.domain === "content" && s.direction === "negative");
+    return {
+      action: "do_not_open",
+      label: "Nicht öffnen",
+      reason: "Die E-Mail zeigt starke Hinweise auf Phishing oder Missbrauch. Öffnen Sie keine Links oder Anhänge.",
+      primaryDriver: contentSignal?.key || "content:high_risk",
+    };
+  }
+
+  // 2. Identity spoofing detected
+  const spoofingSignal = signals.find((s) => s.key === "identity:spoofing");
+  if (spoofingSignal) {
+    return {
+      action: "do_not_open",
+      label: "Nicht öffnen",
+      reason: "Es wurden Anzeichen für Absender-Spoofing erkannt. Interagieren Sie nicht mit dieser E-Mail.",
+      primaryDriver: "identity:spoofing",
+    };
+  }
+
+  // 3. Malicious links detected
+  if (linkStats.malicious > 0) {
+    return {
+      action: "do_not_open",
+      label: "Nicht öffnen",
+      reason: "Mindestens ein Link wurde von Reputationsdiensten als schädlich eingestuft.",
+      primaryDriver: signals.find((s) => s.key.startsWith("links:malicious"))?.key || "links:malicious",
+    };
+  }
+
+  // 4. Hard critical negative signal at tier 5 (auth fail + suspicious identity)
+  const hardNegative = signals.find(
+    (s) => s.tier === 5 && s.direction === "negative" && s.domain !== "content"
+  );
+  if (hardNegative && identity.consistency === "suspicious") {
+    return {
+      action: "do_not_open",
+      label: "Nicht öffnen",
+      reason: "Kritische Sicherheitsbefunde in Kombination mit verdächtiger Absenderidentität.",
+      primaryDriver: hardNegative.key,
+    };
+  }
+
+  // ─── "open" eligibility ────────────────────────────────────────────
+
+  const hasHardNegative = signals.some(
+    (s) => s.tier >= 5 && s.direction === "negative"
+  );
+  const hasMediumNegative = signals.some(
+    (s) => s.tier >= 3 && s.direction === "negative"
+      && s.category !== "reputation_coverage" // not_checked/unknown is handled via evidence quality
+  );
+  const authPassCount = identity.authSignals.filter((a) => a.status === "pass").length;
+  const identityOk = identity.consistency === "consistent" || identity.consistency === "partial_mismatch";
+  const reputationCov = linkStats.reputationCoverage;
+
+  // Evidence quality check: is the analysis basis strong enough for "open"?
+  const hasStrongEvidence =
+    (reputationCov === "clean" || reputationCov === "none") // no links, or all fully verified clean
+    && authPassCount >= 2
+    && identityOk;
+
+  const hasAdequateEvidence =
+    (reputationCov === "clean" || reputationCov === "partially_analyzed" || reputationCov === "none")
+    && authPassCount >= 1
+    && identityOk;
+
+  // "open" requires: no hard negatives, no significant negatives, adequate evidence
+  if (!hasHardNegative && !hasMediumNegative && hasStrongEvidence) {
+    return {
+      action: "open",
+      label: "Öffnen",
+      reason: "Es wurden keine relevanten Risikosignale erkannt. Die E-Mail kann geöffnet werden.",
+      primaryDriver: null,
+    };
+  }
+
+  // Bulk sender (newsletter) with good auth and no hard negatives
+  if (identity.isBulkSender && !hasHardNegative && hasAdequateEvidence
+    && conflict.bulkDowngradeApplied) {
+    return {
+      action: "open",
+      label: "Öffnen",
+      reason: "Newsletter/Mailing-Dienst mit gültiger Authentifizierung erkannt.",
+      primaryDriver: "bulk:detected",
+    };
+  }
+
+  // ─── "manual_review" — default for unclear cases ───────────────────
+
+  // Determine the primary reason for caution
+  let reason = "Die Bewertung ist nicht eindeutig. Bitte prüfen Sie die E-Mail sorgfältig oder leiten Sie sie an die IT-Sicherheit weiter.";
+  let driver: string | null = null;
+
+  if (hasHardNegative) {
+    const neg = signals.find((s) => s.tier >= 5 && s.direction === "negative");
+    reason = "Es bestehen sicherheitsrelevante Auffälligkeiten. Bitte prüfen Sie die E-Mail sorgfältig.";
+    driver = neg?.key || null;
+  } else if (reputationCov === "unknown" || reputationCov === "not_checked") {
+    reason = "Die Reputationsbewertung ist nicht belastbar. Eine abschließende Einschätzung ist nicht möglich.";
+    driver = "reputation:insufficient";
+  } else if (reputationCov === "partially_analyzed") {
+    reason = "Die Reputationsprüfung ist unvollständig. Bitte behandeln Sie die E-Mail mit Vorsicht.";
+    driver = "reputation:partial";
+  } else if (conflict.hasConflict) {
+    reason = "Es liegen widersprüchliche Signale vor. Bitte prüfen Sie die E-Mail sorgfältig.";
+    driver = conflict.dominantSignal?.key || null;
+  } else if (linkStats.suspicious > 0) {
+    reason = "Mindestens ein Link wurde als verdächtig eingestuft. Bitte seien Sie vorsichtig.";
+    driver = signals.find((s) => s.key.startsWith("links:suspicious"))?.key || null;
+  }
+
+  return {
+    action: "manual_review",
+    label: "Vorsicht – bitte prüfen",
+    reason,
+    primaryDriver: driver,
+  };
+}
+
 // ─── Analysis Summary (serializable) ────────────────────────────────────────
 
 export function buildAnalysisSummary(
@@ -169,7 +317,8 @@ export function buildAnalysisSummary(
   classification: string | null,
   analystSummary: string | null,
   contentRiskLevel: "none" | "low" | "high" = "none",
-  overrideApplied: boolean = false
+  overrideApplied: boolean = false,
+  actionDecision: ActionDecision | null = null,
 ): AnalysisSummary {
   return {
     version: 1,
@@ -203,6 +352,9 @@ export function buildAnalysisSummary(
       explanation: conflict.explanation,
       bulkDowngradeApplied: conflict.bulkDowngradeApplied,
     },
+    actionDecision: actionDecision
+      ? { action: actionDecision.action, label: actionDecision.label, reason: actionDecision.reason, primaryDriver: actionDecision.primaryDriver }
+      : { action: "manual_review" as const, label: "Vorsicht – bitte prüfen", reason: "Keine Entscheidung berechnet.", primaryDriver: null },
   };
 }
 
@@ -239,7 +391,18 @@ export function analyzeResult(result: any): AnalysisResult {
   // 5. Decision override: phishing content must not result in "allow"
   const overrideApplied = evaluateDecisionOverride(contentRiskLevel, signals, linkStats);
 
-  // 6. Decision explanation — derived from signals and conflict
+  // 6. Action decision — deterministic, operative recommendation for end user
+  const actionDecision = computeActionDecision(
+    contentRiskLevel,
+    signals,
+    normalized,
+    identity,
+    linkStats,
+    conflict,
+    a?.classification || null,
+  );
+
+  // 7. Decision explanation — derived from signals and conflict
   const explanation = generateDecisionExplanation(
     signals,
     conflict,
@@ -248,7 +411,7 @@ export function analyzeResult(result: any): AnalysisResult {
     normalized
   );
 
-  // 7. Serializable summary
+  // 8. Serializable summary
   const summary = buildAnalysisSummary(
     normalized,
     decisionFactors,
@@ -257,7 +420,8 @@ export function analyzeResult(result: any): AnalysisResult {
     a?.classification || null,
     a?.analyst_summary || null,
     contentRiskLevel,
-    overrideApplied
+    overrideApplied,
+    actionDecision,
   );
 
   return {
@@ -272,6 +436,7 @@ export function analyzeResult(result: any): AnalysisResult {
     explanation,
     contentRiskLevel,
     overrideApplied,
+    actionDecision,
     summary,
   };
 }

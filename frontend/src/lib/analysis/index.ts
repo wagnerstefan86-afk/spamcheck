@@ -24,11 +24,13 @@ export type {
   SignalSourceType,
   AnalysisSummary,
   AnalysisResult,
+  ActionDecision,
+  ActionLevel,
 } from "./types";
 
 // Central pipeline (primary API)
 export type { DecisionFactors } from "./decision";
-export { analyzeResult, buildAnalysisSummary, generateDecisionExplanation, extractDecisionFactors, extractScoreDrivers } from "./decision";
+export { analyzeResult, buildAnalysisSummary, generateDecisionExplanation, extractDecisionFactors, extractScoreDrivers, computeActionDecision } from "./decision";
 
 // Normalization (for direct use in tests)
 export { normalizeSignals, toPrioritizedSignals, toEvidenceGroups, deriveCanonicalKey } from "./normalize";
