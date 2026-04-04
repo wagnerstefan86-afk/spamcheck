@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 import logging
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,9 @@ from .models import AnalysisJob, ExtractedLink, ExternalCheckResult, LlmAssessme
 from .schemas import (
     JobStatusResponse, JobResultResponse, LinkResponse, LlmAssessmentResponse,
     SenderInfo, ExternalCheckResponse, PipelineTraceResponse,
+    ServiceResultResponse, AnalysisSummaryResponse,
+    ActionDecisionResponse, IdentitySummaryResponse, ReputationSummaryResponse,
+    DecisionFactorsResponse, NormalizedSignalResponse,
 )
 from .services.analysis_runner import run_analysis
 
@@ -20,8 +24,11 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="MailScope Email Security Analysis",
-    version="3.0.0",
-    description="Analysiert E-Mail-Dateien auf Phishing, Spoofing und andere Sicherheitsrisiken.",
+    version="4.0.0",
+    description=(
+        "Analysiert E-Mail-Dateien auf Phishing, Spoofing und andere Sicherheitsrisiken. "
+        "Deterministischer Analyseservice — vorbereitet für Copilot Studio Integration."
+    ),
 )
 
 app.add_middleware(
@@ -48,19 +55,28 @@ def _log_task_exception(task: asyncio.Task, job_id: str):
         logger.error("Unhandled exception in analysis task for job %s: %s", job_id, exc, exc_info=exc)
 
 
-@app.get("/api/health")
+# ─── Health ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/health", tags=["System"])
 async def health():
     settings = get_settings()
     return {
         "status": "ok",
         "service": "mailscope",
-        "enable_virustotal": settings.enable_virustotal,
-        "enable_urlscan": settings.enable_urlscan,
-        "enable_llm": settings.enable_llm,
+        "version": "4.0.0",
+        "mode": settings.service_mode,
+        "capabilities": {
+            "virustotal": settings.enable_virustotal,
+            "urlscan": settings.enable_urlscan,
+            "llm_legacy": settings.enable_llm,
+            "deterministic_engine": True,
+        },
     }
 
 
-@app.post("/api/upload", response_model=JobStatusResponse)
+# ─── Upload / Analyse starten ──────────────────────────────────────────────
+
+@app.post("/api/upload", response_model=JobStatusResponse, tags=["Analysis"])
 async def upload_email(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -90,8 +106,13 @@ async def upload_email(
         logger.warning("Upload rejected: empty file: %s", file.filename)
         raise HTTPException(400, "Datei ist leer. Bitte laden Sie eine gültige .eml oder .msg Datei hoch.")
 
+    # Compute expiry if retention is configured
+    expires_at = None
+    if settings.job_retention_hours > 0:
+        expires_at = datetime.utcnow() + timedelta(hours=settings.job_retention_hours)
+
     job_id = str(uuid.uuid4())
-    job = AnalysisJob(id=job_id, filename=file.filename, status="queued", warnings=[])
+    job = AnalysisJob(id=job_id, filename=file.filename, status="queued", warnings=[], expires_at=expires_at)
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -105,7 +126,9 @@ async def upload_email(
     return job
 
 
-@app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
+# ─── Status abfragen ───────────────────────────────────────────────────────
+
+@app.get("/api/jobs/{job_id}", response_model=JobStatusResponse, tags=["Analysis"])
 async def get_job_status(job_id: str, db: Session = Depends(get_db)):
     job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
     if not job:
@@ -113,8 +136,11 @@ async def get_job_status(job_id: str, db: Session = Depends(get_db)):
     return job
 
 
-@app.get("/api/jobs/{job_id}/result", response_model=JobResultResponse)
+# ─── Ergebnis abrufen (Legacy / UI-orientiert) ─────────────────────────────
+
+@app.get("/api/jobs/{job_id}/result", response_model=JobResultResponse, tags=["Analysis"])
 async def get_job_result(job_id: str, db: Session = Depends(get_db)):
+    """Full analysis result including raw data — used by the standalone web UI."""
     job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
     if not job:
         raise HTTPException(404, "Job nicht gefunden")
@@ -173,6 +199,9 @@ async def get_job_result(job_id: str, db: Session = Depends(get_db)):
             "legitimacy_likelihood_score": job.legitimacy_likelihood_score,
         }
 
+    # Build analysis_summary from stored data
+    summary = _build_summary_response(job)
+
     return JobResultResponse(
         id=job.id,
         filename=job.filename,
@@ -198,18 +227,62 @@ async def get_job_result(job_id: str, db: Session = Depends(get_db)):
         deterministic_findings=job.deterministic_findings or [],
         assessment=assessment,
         reputation_stats=job.reputation_stats,
+        analysis_summary=summary,
         enable_virustotal=settings.enable_virustotal,
         enable_urlscan=settings.enable_urlscan,
         enable_llm=settings.enable_llm,
     )
 
 
-@app.get("/api/jobs/{job_id}/trace", response_model=PipelineTraceResponse)
+# ─── Copilot-optimiertes Ergebnis (Service-Endpoint) ───────────────────────
+
+@app.get("/api/jobs/{job_id}/summary", response_model=ServiceResultResponse, tags=["Copilot Service"])
+async def get_job_summary(job_id: str, db: Session = Depends(get_db)):
+    """Copilot-optimized structured analysis summary.
+
+    Returns only the essential analysis result — designed for consumption
+    by Copilot Studio REST connector. No raw headers, no trace data.
+    """
+    job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+    if not job:
+        raise HTTPException(404, detail="Job nicht gefunden")
+
+    if job.status not in ("completed", "completed_with_warnings"):
+        raise HTTPException(
+            409,
+            detail=f"Analyse noch nicht abgeschlossen (Status: {job.status})",
+        )
+
+    summary = _build_summary_response(job)
+    if not summary:
+        raise HTTPException(500, detail="Analyseergebnis konnte nicht erstellt werden")
+
+    return ServiceResultResponse(
+        job_id=job.id,
+        filename=job.filename,
+        status=job.status,
+        subject=job.subject,
+        sender=SenderInfo(
+            from_address=job.sender_from,
+            reply_to=job.sender_reply_to,
+            return_path=job.sender_return_path,
+            to=job.recipient_to,
+            date=job.date,
+            message_id=job.message_id,
+        ),
+        analysis_summary=summary,
+        warnings=job.warnings or [],
+    )
+
+
+# ─── Pipeline Trace (intern / analytisch) ──────────────────────────────────
+
+@app.get("/api/jobs/{job_id}/trace", response_model=PipelineTraceResponse, tags=["Debug"])
 async def get_job_trace(job_id: str, db: Session = Depends(get_db)):
     """Debug endpoint: returns the full pipeline trace for a job.
 
     Shows every step that was executed, with timestamps, status, and details.
-    Use this to verify whether API calls were actually made and results fetched.
+    Internal/analyst use only — not intended for Copilot consumption.
     """
     job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
     if not job:
@@ -224,9 +297,11 @@ async def get_job_trace(job_id: str, db: Session = Depends(get_db)):
     )
 
 
-@app.get("/api/jobs/{job_id}/export")
+# ─── Export (Legacy) ────────────────────────────────────────────────────────
+
+@app.get("/api/jobs/{job_id}/export", tags=["Analysis"])
 async def export_job(job_id: str, db: Session = Depends(get_db)):
-    """Export full analysis as structured JSON."""
+    """Export full analysis as structured JSON (legacy endpoint)."""
     job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
     if not job:
         raise HTTPException(404, "Job nicht gefunden")
@@ -305,7 +380,66 @@ async def export_job(job_id: str, db: Session = Depends(get_db)):
         "deterministic_findings": job.deterministic_findings,
         "links": link_data,
         "assessment": assessment,
+        "analysis_summary": job.analysis_summary,
         "reputation_stats": job.reputation_stats,
         "warnings": job.warnings,
         "pipeline_summary": job.pipeline_summary,
     }
+
+
+# ─── Helpers ────────────────────────────────────────────────────────────────
+
+def _build_summary_response(job: AnalysisJob) -> AnalysisSummaryResponse | None:
+    """Build AnalysisSummaryResponse from stored analysis_summary JSON."""
+    summary_data = job.analysis_summary
+    if not summary_data or not isinstance(summary_data, dict) or "version" not in summary_data:
+        return None
+
+    try:
+        action = summary_data.get("action_decision", {})
+        identity = summary_data.get("identity_summary", {})
+        reputation = summary_data.get("reputation_summary", {})
+        factors = summary_data.get("decision_factors", {})
+
+        signals = []
+        for s in summary_data.get("signals", []):
+            signals.append(NormalizedSignalResponse(
+                key=s.get("key", ""),
+                canonical_key=s.get("canonical_key", ""),
+                label=s.get("label", ""),
+                severity=s.get("severity", "context"),
+                tier=s.get("tier", 1),
+                direction=s.get("direction", "positive"),
+                domain=s.get("domain", ""),
+                category=s.get("category", ""),
+            ))
+
+        return AnalysisSummaryResponse(
+            version=summary_data.get("version", 2),
+            action_decision=ActionDecisionResponse(
+                action=action.get("action", "manual_review"),
+                label=action.get("label", ""),
+                reason=action.get("reason", ""),
+                primary_driver=action.get("primary_driver"),
+            ),
+            action_label=summary_data.get("action_label", action.get("label", "")),
+            action_reason=summary_data.get("action_reason", action.get("reason", "")),
+            classification=summary_data.get("classification", "unknown"),
+            risk_score=summary_data.get("risk_score", 0),
+            confidence=summary_data.get("confidence", 0),
+            content_risk_level=summary_data.get("content_risk_level", "none"),
+            decision_factors=DecisionFactorsResponse(
+                negative=factors.get("negative", []),
+                positive=factors.get("positive", []),
+            ),
+            identity_summary=IdentitySummaryResponse(**identity) if identity else IdentitySummaryResponse(
+                consistency="partial_mismatch", consistency_detail="Nicht verfügbar", is_bulk_sender=False
+            ),
+            reputation_summary=ReputationSummaryResponse(**reputation) if reputation else ReputationSummaryResponse(),
+            signals=signals,
+            escalation_hint=summary_data.get("escalation_hint"),
+            override_applied=summary_data.get("override_applied", False),
+        )
+    except Exception as e:
+        logger.error("Failed to build summary response for job %s: %s", job.id, e)
+        return None

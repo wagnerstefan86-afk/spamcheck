@@ -11,13 +11,19 @@ class Settings(BaseSettings):
     # Service toggles
     enable_virustotal: bool = True
     enable_urlscan: bool = True
-    enable_llm: bool = True
+    enable_llm: bool = False  # Legacy: LLM disabled by default (Copilot-ready mode)
 
     # urlscan config
     urlscan_visibility: str = "private"
 
-    # LLM config
+    # LLM config (legacy — only used when enable_llm=True)
     llm_model: str = "gpt-4o"
+
+    # Service mode: "standalone" (with UI) or "service" (headless API for Copilot)
+    service_mode: str = "standalone"
+
+    # Retention: TTL for completed jobs in hours (0 = no auto-cleanup)
+    job_retention_hours: int = 0
 
     # Polling config
     max_poll_seconds: int = 120

@@ -19,6 +19,7 @@ from .link_analyzer import analyze_link
 from .header_analyzer import analyze_headers
 from .pre_scorer import compute_pre_scores, deterministic_assessment
 from .scan_status import ScanStatus, JobTrace, LinkVerdict, compute_link_verdict
+from .decision_engine import compute_analysis_summary
 from . import virustotal, urlscan, llm_client
 
 logger = logging.getLogger(__name__)
@@ -327,14 +328,16 @@ async def run_analysis(job_id: str, filename: str, raw_bytes: bytes):
                     detail=f"phishing={scores['phishing_likelihood_score']}, "
                            f"advertising={scores['advertising_likelihood_score']}")
 
-        # --- Stage 5: LLM Assessment ---
-        _update_status(db, job, "llm_assessment")
-        trace.emit("pipeline", "stage_started", detail="llm_assessment")
+        # --- Stage 5: Assessment (deterministic default, LLM legacy opt-in) ---
+        _update_status(db, job, "assessment")
+        trace.emit("pipeline", "stage_started", detail="assessment")
 
         assessment_data = None
         is_fallback = False
 
         if settings.enable_llm and settings.openai_api_key:
+            # Legacy LLM path — only active when explicitly enabled
+            trace.emit("pipeline", "llm_legacy_path", detail="LLM enabled via config")
             try:
                 assessment_data = await llm_client.get_assessment(
                     parsed, header_findings, link_dicts, external_results_all, scores,
@@ -352,9 +355,11 @@ async def run_analysis(job_id: str, filename: str, raw_bytes: bytes):
             elif settings.enable_llm:
                 _add_warning(db, job, "LLM aktiviert, aber kein API-Key konfiguriert")
                 trace.emit("pipeline", "llm_not_executed", detail="No API key")
+            else:
+                trace.emit("pipeline", "llm_disabled", detail="Deterministic-only mode (Copilot-ready)")
             assessment_data = deterministic_assessment(scores, scores.get("findings", []))
             is_fallback = True
-            trace.emit("pipeline", "deterministic_fallback",
+            trace.emit("pipeline", "deterministic_assessment",
                         detail=f"classification={assessment_data['classification']}")
 
         llm_record = LlmAssessment(
@@ -369,6 +374,57 @@ async def run_analysis(job_id: str, filename: str, raw_bytes: bytes):
             is_deterministic_fallback=is_fallback,
         )
         db.add(llm_record)
+
+        # --- Stage 6: Decision Engine — compute analysis_summary ---
+        trace.emit("pipeline", "stage_started", detail="decision_engine")
+        try:
+            # Build link dicts with external checks and verdicts for decision engine
+            db_links_final = db.query(ExtractedLink).filter(ExtractedLink.job_id == job_id).all()
+            links_for_decision = []
+            for dl in db_links_final:
+                checks = db.query(ExternalCheckResult).filter(ExternalCheckResult.link_id == dl.id).all()
+                links_for_decision.append({
+                    "original_url": dl.original_url,
+                    "normalized_url": dl.normalized_url,
+                    "hostname": dl.hostname,
+                    "verdict": dl.verdict,
+                    "has_display_mismatch": dl.has_display_mismatch,
+                    "is_ip_literal": dl.is_ip_literal,
+                    "is_punycode": dl.is_punycode,
+                    "is_suspicious_tld": dl.is_suspicious_tld,
+                    "is_shortener": dl.is_shortener,
+                    "is_tracking_heavy": dl.is_tracking_heavy,
+                    "external_checks": [{
+                        "service": c.service,
+                        "status": c.status,
+                        "scan_status": c.scan_status or "unknown",
+                        "malicious_count": c.malicious_count,
+                        "suspicious_count": c.suspicious_count,
+                        "result_fetched": c.result_fetched or False,
+                    } for c in checks],
+                })
+
+            analysis_summary = compute_analysis_summary(
+                parsed=parsed,
+                header_findings=header_findings,
+                links=links_for_decision,
+                scores=scores,
+                assessment=assessment_data,
+                reputation_stats=rep_stats,
+                structured_headers=parsed.get("structured_headers", {}),
+            )
+            job.analysis_summary = analysis_summary
+            db.commit()
+
+            action = analysis_summary.get("action_decision", {})
+            trace.emit("pipeline", "decision_engine_completed",
+                        detail=f"action={action.get('action', '?')}, "
+                               f"risk={analysis_summary.get('risk_score', '?')}, "
+                               f"content_risk={analysis_summary.get('content_risk_level', '?')}")
+        except Exception as e:
+            logger.error("Decision engine failed for job %s: %s", job_id, e, exc_info=True)
+            trace.emit("pipeline", "decision_engine_failed", detail=str(e)[:200])
+            _add_warning(db, job, f"Decision Engine fehlgeschlagen: {e}")
 
         # --- Done ---
         has_warnings = bool(job.warnings)

@@ -47,6 +47,12 @@ class AnalysisJob(Base):
     # Reputation pipeline stats
     reputation_stats = Column(JSON, default=dict)
 
+    # Central analysis summary — the primary Copilot data contract
+    analysis_summary = Column(JSON, default=dict)
+
+    # Retention: when this job expires (null = no expiry)
+    expires_at = Column(DateTime, nullable=True)
+
     links = relationship("ExtractedLink", back_populates="job", cascade="all, delete-orphan")
     llm_assessment = relationship("LlmAssessment", back_populates="job", uselist=False, cascade="all, delete-orphan")
 
